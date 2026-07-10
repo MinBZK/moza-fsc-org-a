@@ -1,0 +1,80 @@
+# Cert-attachments op ZAD — magazijn-a-peer
+
+> Draaiboek voor de mens: de cert-attachments mounten. Uit te voeren ná `pki/issue.sh` (zie
+> `pki/README.md`) en rond `upsert-peer.sh apply`.
+
+## Waarom UI-only
+
+De ZAD v2 Operations Manager API dekt deployment + componenten (image, env_vars, aliases,
+services) maar **geen bijlagen** — net als repo A's directory-deploy
+(`deploy/zad/upsert-directory.sh`, zie de header-comment daar). Cert-mounts op
+`/etc/fsc/...`-paden gaan dus via de ZAD-UI, per component, als losse attachment-bestanden
+(geen `combined.pem` nodig — zie `pki/zad-bundle.sh`, modus 2/passthrough).
+
+## Volgorde
+
+0. **Group-CA plaatsen (NIET `init-ca.sh`).** Voor de échte directory moet de group-leaf ketenen
+   naar fsc-testnet's group-root. Zet fsc-testnet's `ca/root.pem` + `ca/intermediate.pem` (+ keys)
+   in `pki/ca/` — draai `init-ca.sh` **niet** (dat maakt een verse, vreemde CA). De
+   INTERNAL-CA blijft wél lokaal/self-signed (die maakt `issue.sh` per-peer aan).
+1. `pki/issue.sh` (vereist `cfssl`) — genereert `pki/out/magazijn-a/*` (group,
+   getekend door fsc-testnet's intermediate) en `pki/internal/magazijn-a/*` (internal).
+2. `pki/zad-bundle.sh magazijn-a` (hangt af van stap 1) — verzamelt de
+   upload-klare set in `pki/zad-upload/magazijn-a/` met een eigen `MANIFEST.md`
+   (bestand → pod-pad → `TLS_*`-env-var, zie dat script voor de exacte `env_for()`-mapping).
+3. Per component (`mgzmgr`, `mgzctl`, `mgzinway`) in de ZAD-UI: bijlage toevoegen op het
+   `/etc/fsc/...`-pad uit de tabellen hieronder, met de bestandsinhoud uit stap 2's
+   upload-set. De paden zijn identiek aan de `TLS_*`-waarden die `upsert-peer.sh` al als
+   `env_vars`/`aliases` naar de component stuurt — de attachment moet dus exact op dat pad
+   gemount worden, anders faalt de container-boot met een ontbrekend-bestand-fout.
+
+## mgzmgr (manager)
+
+| Bijlage-pad (`/etc/fsc/...`) | Bronbestand (`pki/...`) | Env-var op mgzmgr |
+|-------------------------------|-------------------------------------------|--------------------|
+| `ca/root.pem` | `ca/root.pem` | `TLS_GROUP_ROOT_CERT` |
+| `out/magazijn-a/manager/cert.pem` | `out/magazijn-a/manager/cert.pem` | `TLS_GROUP_CERT`, `TLS_GROUP_TOKEN_CERT`, `TLS_GROUP_CONTRACT_CERT` |
+| `out/magazijn-a/manager/key.pem` | `out/magazijn-a/manager/key.pem` | `TLS_GROUP_KEY`, `TLS_GROUP_TOKEN_KEY`, `TLS_GROUP_CONTRACT_KEY` |
+| `internal/magazijn-a/ca/root.pem` | `internal/magazijn-a/ca/root.pem` | `TLS_ROOT_CERT`, `TLS_INTERNAL_UNAUTHENTICATED_ROOT_CERT` |
+| `internal/magazijn-a/manager/cert.pem` | `internal/magazijn-a/manager/cert.pem` | `TLS_CERT`, `TLS_INTERNAL_UNAUTHENTICATED_CERT` |
+| `internal/magazijn-a/manager/key.pem` | `internal/magazijn-a/manager/key.pem` | `TLS_KEY`, `TLS_INTERNAL_UNAUTHENTICATED_KEY` |
+
+## mgzctl (controller)
+
+| Bijlage-pad (`/etc/fsc/...`) | Bronbestand (`pki/...`) | Env-var op mgzctl |
+|-------------------------------|-------------------------------------------|--------------------|
+| `internal/magazijn-a/ca/root.pem` | `internal/magazijn-a/ca/root.pem` | `TLS_ROOT_CERT` |
+| `internal/magazijn-a/controller/cert.pem` | `internal/magazijn-a/controller/cert.pem` | `TLS_CERT` |
+| `internal/magazijn-a/controller/key.pem` | `internal/magazijn-a/controller/key.pem` | `TLS_KEY` |
+
+De controller heeft geen group-cert nodig (hij spreekt geen mesh-verkeer met andere peers, alleen
+de eigen manager op de internal-PKI) — vandaar geen `out/magazijn-a/controller/*`-rij.
+
+## mgzinway (inway)
+
+| Bijlage-pad (`/etc/fsc/...`) | Bronbestand (`pki/...`) | Env-var op mgzinway |
+|-------------------------------|-------------------------------------------|--------------------|
+| `ca/root.pem` | `ca/root.pem` | `TLS_GROUP_ROOT_CERT` |
+| `out/magazijn-a/inway/cert.pem` | `out/magazijn-a/inway/cert.pem` | `TLS_GROUP_CERT` |
+| `out/magazijn-a/inway/key.pem` | `out/magazijn-a/inway/key.pem` | `TLS_GROUP_KEY` |
+| `internal/magazijn-a/ca/root.pem` | `internal/magazijn-a/ca/root.pem` | `TLS_ROOT_CERT` |
+| `internal/magazijn-a/inway/cert.pem` | `internal/magazijn-a/inway/cert.pem` | `TLS_CERT` |
+| `internal/magazijn-a/inway/key.pem` | `internal/magazijn-a/inway/key.pem` | `TLS_KEY` |
+
+## mgztxlog (txlog-api)
+
+txlog spreekt uitsluitend mTLS op de INTERNAL-PKI (geen group-cert — group-agnostische opslag),
+net als in de lokale compose.
+
+| Bijlage-pad (`/etc/fsc/...`) | Bronbestand (`pki/...`) | Env-var op mgztxlog |
+|-------------------------------|-------------------------------------------|--------------------|
+| `internal/magazijn-a/ca/root.pem` | `internal/magazijn-a/ca/root.pem` | `TLS_ROOT_CERT` |
+| `internal/magazijn-a/txlog/cert.pem` | `internal/magazijn-a/txlog/cert.pem` | `TLS_CERT` |
+| `internal/magazijn-a/txlog/key.pem` | `internal/magazijn-a/txlog/key.pem` | `TLS_KEY` |
+
+## Na het mounten
+
+Herstart (of laat ZAD herstarten na attachment-wijziging) elk component en controleer de boot-log
+op een TLS-laadfout — een fout pad of een verwisselde group/internal-cert faalt hard bij startup
+("no such file", of een handshake-fout tegen de verkeerde CA). Ga daarna verder met
+`verify-zad.md`.

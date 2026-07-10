@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+# Zet de provider-peer magazijn-a (manager+controller+inway) op ZAD via de v2 Operations Manager
+# API in een EIGEN ZAD-project `mpfoa-e01`. De `magazijna`-app draait apart in `mpfm-w3h`; de inway
+# bereikt die cross-project via de ingress-URL (ZAD_MAGAZIJNA_PROJECT/-UPSTREAM_URL). Gebaseerd op
+# repo A's deploy/zad/upsert-directory.sh (MinBZK/moza-fsc-testnet) — zelfde validate/plan/apply-
+# vorm, één bron voor CLI + de workflow zad-deploy-peer.yml.
+#
+# Eigen project = eigen ZAD-API-key: ZAD_API_KEY hoort bij `mpfoa-e01`, NIET de magazijnen-key.
+#
+# Model: de peer draait in de deployment `test` van het eigen project. Doordat het een eigen project
+# is, is er geen app-deployment om te overschrijven (project-isolatie i.p.v. deployment-isolatie).
+# `:upsert-deployment` zet per component de {reference,image} en updatet het deployment;
+# POST /components verrijkt elke component met env_vars/port/services/aliases.
+#
+# BELANGRIJK — `:upsert-deployment` maakt géén NIEUW deployment aan (geeft wel HTTP 202, maar het
+# deployment verschijnt niet in /deployments); het UPDATET alleen een bestaand deployment. `test` is
+# doorgaans het default-deployment van een nieuw ZAD-project en bestaat dus al — dit script vult het.
+# Bestaat het (nog) niet, maak het dan éénmalig handmatig (leeg) aan in de Operations Manager-UI.
+# cloneFrom is optioneel (ZAD_PEER_CLONE_FROM) maar afgeraden: clonen van bv. de app sleept de
+# app-images (clickhouse/magazijna/magazijnb) mee.
+# NIET via de API (UI-only): bijlagen (cert-mount) + "Publicatie op het web" (passthrough-TLS) —
+# zie cert-manifest.md.
+#
+# DB: elke component met een eigen managed Postgres (mgzmgr, mgzctl, mgztxlog) krijgt zijn
+# STORAGE_POSTGRES_DSN via ZAD-substitutievars ($DATABASE_*), in de `aliases`-body — die vars zijn
+# pas bij deploy-tijd bekend en kunnen dus niet in bash worden opgelost. Dat is het ENIGE dat in
+# aliases hoeft.
+#
+# BELANGRIJK — ZAD past component-config (env_vars/aliases) alleen bij COMPONENT-CREATIE toe, niet
+# bij een re-POST op een bestaande component (bewezen: een tx-log-adres dat pas in een tweede deploy
+# aan de aliases werd toegevoegd bereikte de al-bestaande manager niet). Wijzig je de config van een
+# bestaande component, verwijder 'm dan eerst in de UI zodat de volgende apply 'm opnieuw aanmaakt.
+#
+# De deployment is VAST (test/mpfoa-e01), dus we hebben ZAD's $DEPLOYMENT_NAME-substitutie niet
+# nodig: bash lost alle inter-component-hostnamen concreet op (MGZ*_HOST_DISPLAY) en zet ze in
+# `env_vars`. Zo leunen de adressen niet op aliases-substitutie. Alleen de DSN ($DATABASE_*) blijft
+# in `aliases`.
+#
+# Usage:
+#   export ZAD_API_KEY=...                          # niet inline (echo't anders)
+#   ./deploy/zad/upsert-peer.sh validate                       # read-only auth-check
+#   ./deploy/zad/upsert-peer.sh plan   [deployment] [tag]       # toont bodies, muteert niet
+#   ./deploy/zad/upsert-peer.sh apply  [deployment] [tag]       # muteert + pollt tasks
+# Env: ZAD_API_KEY (verplicht bij apply; key van project mpfoa-e01), ZAD_PROJECT (mpfoa-e01),
+#      ZAD_BASE (zad.rijksapp.nl), ZAD_BASE_DOMAIN (rig.prd1...), ZAD_MANAGER_TAG (ghcr manager-tag,
+#      default = tag), ZAD_DIRECTORY_MANAGER_HOST (repo A's directory-manager-host op ZAD),
+#      ZAD_PG_SSLMODE (disable), ZAD_MAGAZIJNA_PROJECT (mpfm-w3h, waar de app draait),
+#      ZAD_MAGAZIJNA_UPSTREAM_URL (endpoint_url van de app-component, cross-project ingress-URL).
+set -euo pipefail
+
+MODE="${1:?usage: upsert-peer.sh <validate|plan|apply> [deployment=test] [tag=v1.43.7]}"
+DEPLOYMENT="${2:-test}"
+IMAGE_TAG="${3:-v1.43.7}"                        # OpenFSC stock-tag (controller/inway; default voor de manager-wrapper)
+MANAGER_TAG="${ZAD_MANAGER_TAG:-${IMAGE_TAG}}"   # manager-migrate (ghcr) kan een eigen tag hebben
+PROJECT="${ZAD_PROJECT:-mpfoa-e01}"
+BASE="${ZAD_BASE:-https://zad.rijksapp.nl}"
+BASE_DOMAIN="${ZAD_BASE_DOMAIN:-rig.prd1.gn2.quattro.rijksapps.nl}"
+PG_SSLMODE="${ZAD_PG_SSLMODE:-disable}"          # managed DB intra-cluster: plaintext (zoals berichtenbox-JDBC)
+CLONE_FROM="${ZAD_PEER_CLONE_FROM:-}"            # leeg = geen clone; `test` bestaat doorgaans al als project-default
+
+case "${MODE}" in validate|plan|apply) ;; *) echo "mode = validate | plan | apply"; exit 1 ;; esac
+case "${DEPLOYMENT}" in ""|*[!a-z0-9-]*) echo "ongeldige deployment: '${DEPLOYMENT}'"; exit 1 ;; esac
+case "${IMAGE_TAG}" in ""|*[!A-Za-z0-9._-]*) echo "ongeldige image_tag: '${IMAGE_TAG}'"; exit 1 ;; esac
+case "${MANAGER_TAG}" in ""|*[!A-Za-z0-9._-]*) echo "ongeldige ZAD_MANAGER_TAG: '${MANAGER_TAG}'"; exit 1 ;; esac
+[ "${MODE}" = apply ] && : "${ZAD_API_KEY:?zet ZAD_API_KEY in je env}"
+
+MANAGER_IMAGE="ghcr.io/minbzk/moza-fsc-testnet/manager-migrate:${MANAGER_TAG}"
+CONTROLLER_IMAGE="docker.io/federatedserviceconnectivity/controller:${IMAGE_TAG}"
+INWAY_IMAGE="docker.io/federatedserviceconnectivity/inway:${IMAGE_TAG}"
+TXLOG_IMAGE="docker.io/federatedserviceconnectivity/txlog-api:${IMAGE_TAG}"
+
+# Concrete hostnamen voor déze (vaste) deployment — zowel voor de plan-/apply-output als, direct,
+# voor de inter-component-adressen in de env_vars-blobs. Geen $DEPLOYMENT_NAME-substitutie: de
+# deployment is vast (test/mpfoa-e01), dus bash lost de hostnaam op en we leunen niet op ZAD's
+# aliases-substitutie (die alleen bij component-creatie wordt toegepast, niet bij een re-POST).
+MGZMGR_HOST_DISPLAY="mgzmgr-${DEPLOYMENT}-${PROJECT}.${BASE_DOMAIN}"
+MGZCTL_HOST_DISPLAY="mgzctl-${DEPLOYMENT}-${PROJECT}.${BASE_DOMAIN}"
+MGZINWAY_HOST_DISPLAY="mgzinway-${DEPLOYMENT}-${PROJECT}.${BASE_DOMAIN}"
+MGZTXLOG_HOST_DISPLAY="mgztxlog-${DEPLOYMENT}-${PROJECT}.${BASE_DOMAIN}"
+
+# Repo A's directory-deployment op ZAD (project mft-tp9, deployment "test" — zie upsert-directory.sh
+# se defaults). TODO(verifieer bij de echte apply): bevestig dat dit nog steeds de actieve
+# directory-host is; override met ZAD_DIRECTORY_MANAGER_HOST als de directory elders draait.
+DIRECTORY_MANAGER_HOST="${ZAD_DIRECTORY_MANAGER_HOST:-dirmgr-test-mft-tp9.${BASE_DOMAIN}}"
+
+# De peer draait in een EIGEN project (`mpfoa-e01`); de magazijna-app draait in `mpfm-w3h`. De inway
+# bereikt de app dus CROSS-PROJECT via de ZAD-ingress-URL (https, :443 — de ingress mapt naar de
+# app-containerpoort; geen poort in de URL). De upstream-URL is daarom afgeleid van het APP-project
+# (ZAD_MAGAZIJNA_PROJECT, NIET het peer-PROJECT) + de app-deployment. Default-app-deployment =
+# `test`; override met ZAD_MAGAZIJNA_DEPLOYMENT (bv. een PR-preview `pr-140`) of volledig met
+# ZAD_MAGAZIJNA_UPSTREAM_URL. Dit is GEEN inway-env-var (OpenFSC kent geen "upstream" op de inway)
+# maar de endpoint_url die bij de service-publicatie op de mgzctl Administration-API wordt
+# meegegeven — zie verify-zad.md, stap (b).
+MAGAZIJNA_PROJECT="${ZAD_MAGAZIJNA_PROJECT:-mpfm-w3h}"
+MAGAZIJNA_DEPLOYMENT="${ZAD_MAGAZIJNA_DEPLOYMENT:-test}"
+MAGAZIJNA_UPSTREAM_URL="${ZAD_MAGAZIJNA_UPSTREAM_URL:-https://magazijna-${MAGAZIJNA_DEPLOYMENT}-${MAGAZIJNA_PROJECT}.${BASE_DOMAIN}}"
+
+# --- env-blobs (KEY=value, newline-sep, plain). TLS_*-paden = de bijlage-mounts (UI, ontwerp A). ---
+MGZMGR_ENV="$(printf '%s\n' \
+  "LOG_TYPE=live" "LOG_LEVEL=info" "AUDITLOG_TYPE=stdout" \
+  "GROUP_ID=moza-fbs-test" \
+  "DIRECTORY_PEER_ID=00000000000000000010" \
+  "AUTO_SIGN_GRANTS=" \
+  "LISTEN_ADDRESS_EXTERNAL=0.0.0.0:8443" \
+  "LISTEN_ADDRESS_INTERNAL=0.0.0.0:9443" \
+  "LISTEN_ADDRESS_INTERNAL_UNAUTHENTICATED=0.0.0.0:9444" \
+  "MONITORING_ADDRESS=0.0.0.0:8080" \
+  "DISABLE_CRL_CHECKS=true" \
+  "TLS_GROUP_ROOT_CERT=/etc/fsc/ca/root.pem" \
+  "TLS_GROUP_CERT=/etc/fsc/out/magazijn-a/manager/cert.pem" \
+  "TLS_GROUP_KEY=/etc/fsc/out/magazijn-a/manager/key.pem" \
+  "TLS_GROUP_TOKEN_CERT=/etc/fsc/out/magazijn-a/manager/cert.pem" \
+  "TLS_GROUP_TOKEN_KEY=/etc/fsc/out/magazijn-a/manager/key.pem" \
+  "TLS_GROUP_CONTRACT_CERT=/etc/fsc/out/magazijn-a/manager/cert.pem" \
+  "TLS_GROUP_CONTRACT_KEY=/etc/fsc/out/magazijn-a/manager/key.pem" \
+  "TLS_ROOT_CERT=/etc/fsc/internal/magazijn-a/ca/root.pem" \
+  "TLS_CERT=/etc/fsc/internal/magazijn-a/manager/cert.pem" \
+  "TLS_KEY=/etc/fsc/internal/magazijn-a/manager/key.pem" \
+  "TLS_INTERNAL_UNAUTHENTICATED_ROOT_CERT=/etc/fsc/internal/magazijn-a/ca/root.pem" \
+  "TLS_INTERNAL_UNAUTHENTICATED_CERT=/etc/fsc/internal/magazijn-a/manager/cert.pem" \
+  "TLS_INTERNAL_UNAUTHENTICATED_KEY=/etc/fsc/internal/magazijn-a/manager/key.pem" \
+  "SELF_ADDRESS=https://${MGZMGR_HOST_DISPLAY}:443" \
+  "DIRECTORY_MANAGER_ADDRESS=https://${DIRECTORY_MANAGER_HOST}:443" \
+  "CONTROLLER_REGISTRATION_API_ADDRESS=https://${MGZCTL_HOST_DISPLAY}:443" \
+  "TX_LOG_API_ADDRESS=https://${MGZTXLOG_HOST_DISPLAY}:443")"
+
+# Aliases = ALLEEN wat een ZAD-substitutievar ($DATABASE_*) nodig heeft: de managed-Postgres-DSN,
+# want die creds zijn pas bij deploy-tijd bekend. \$ houdt ze letterlijk (ZAD vult ze in, niet de
+# shell). De inter-component-adressen staan hierboven concreet in env_vars — geen $DEPLOYMENT_NAME
+# nodig want de deployment is vast, en zo hoeven ze niet op ZAD's aliases-substitutie te leunen.
+# :443 = de mesh-poort (ingress SNI-passthrough -> pod :8443); OpenFSC eist een expliciete poort.
+MGZMGR_ALIASES="$(printf '%s\n' \
+  "STORAGE_POSTGRES_DSN=postgres://\$DATABASE_SERVER_USER:\$DATABASE_PASSWORD@\$DATABASE_SERVER_HOST:5432/\$DATABASE_DB?sslmode=${PG_SSLMODE}")"
+
+MGZCTL_ENV="$(printf '%s\n' \
+  "LOG_TYPE=live" "LOG_LEVEL=info" "AUDITLOG_TYPE=stdout" \
+  "GROUP_ID=moza-fbs-test" \
+  "DIRECTORY_PEER_ID=00000000000000000010" \
+  "AUTHN_TYPE=none" \
+  "AUTHZ_TYPE=rbac" \
+  "CSRF_PROTECTION_ENABLED=false" \
+  "LISTEN_ADDRESS_UI=0.0.0.0:8080" \
+  "LISTEN_ADDRESS_REGISTRATION_API=0.0.0.0:9443" \
+  "LISTEN_ADDRESS_ADMINISTRATION_API=0.0.0.0:9444" \
+  "MONITORING_ADDRESS=0.0.0.0:8081" \
+  "TLS_ROOT_CERT=/etc/fsc/internal/magazijn-a/ca/root.pem" \
+  "TLS_CERT=/etc/fsc/internal/magazijn-a/controller/cert.pem" \
+  "TLS_KEY=/etc/fsc/internal/magazijn-a/controller/key.pem" \
+  "MANAGER_ADDRESS_INTERNAL=https://${MGZMGR_HOST_DISPLAY}:443")"
+# mgzctl heeft een eigen managed Postgres (los van mgzmgr's DB) -> eigen DSN-alias.
+MGZCTL_ALIASES="$(printf '%s\n' \
+  "STORAGE_POSTGRES_DSN=postgres://\$DATABASE_SERVER_USER:\$DATABASE_PASSWORD@\$DATABASE_SERVER_HOST:5432/\$DATABASE_DB?sslmode=${PG_SSLMODE}")"
+
+MGZINWAY_ENV="$(printf '%s\n' \
+  "LOG_TYPE=live" "LOG_LEVEL=info" \
+  "NAME=magazijn-a-inway" \
+  "GROUP_ID=moza-fbs-test" \
+  "LISTEN_ADDRESS=0.0.0.0:8443" \
+  "MONITORING_ADDRESS=0.0.0.0:8081" \
+  "DISABLE_CRL_CHECKS=true" \
+  "TLS_GROUP_ROOT_CERT=/etc/fsc/ca/root.pem" \
+  "TLS_GROUP_CERT=/etc/fsc/out/magazijn-a/inway/cert.pem" \
+  "TLS_GROUP_KEY=/etc/fsc/out/magazijn-a/inway/key.pem" \
+  "TLS_ROOT_CERT=/etc/fsc/internal/magazijn-a/ca/root.pem" \
+  "TLS_CERT=/etc/fsc/internal/magazijn-a/inway/cert.pem" \
+  "TLS_KEY=/etc/fsc/internal/magazijn-a/inway/key.pem" \
+  "SELF_ADDRESS=https://${MGZINWAY_HOST_DISPLAY}:443" \
+  "CONTROLLER_REGISTRATION_API_ADDRESS=https://${MGZCTL_HOST_DISPLAY}:443" \
+  "MANAGER_INTERNAL_UNAUTHENTICATED_ADDRESS=https://${MGZMGR_HOST_DISPLAY}:443" \
+  "TX_LOG_API_ADDRESS=https://${MGZTXLOG_HOST_DISPLAY}:443")"
+# Geen managed DB en geen $DATABASE_*-substitutie -> geen aliases nodig (alle adressen staan
+# concreet in env_vars hierboven).
+MGZINWAY_ALIASES=""
+
+# txlog-api (mirror van deploy/local): eigen managed Postgres, mTLS op de INTERNAL-PKI (geen
+# group-cert, geen GROUP_ID — group-agnostische opslag). De manager/inway loggen hier transacties;
+# OpenFSC eist een niet-lege TX_LOG_API_ADDRESS voor een niet-directory manager. txlog-hardening /
+# het echte data-pad is #728; dit is de minimale draaiende endpoint zodat de manager boot.
+MGZTXLOG_ENV="$(printf '%s\n' \
+  "LOG_TYPE=live" "LOG_LEVEL=info" \
+  "LISTEN_ADDRESS=0.0.0.0:8443" \
+  "MONITORING_ADDRESS=0.0.0.0:8081" \
+  "TLS_ROOT_CERT=/etc/fsc/internal/magazijn-a/ca/root.pem" \
+  "TLS_CERT=/etc/fsc/internal/magazijn-a/txlog/cert.pem" \
+  "TLS_KEY=/etc/fsc/internal/magazijn-a/txlog/key.pem")"
+MGZTXLOG_ALIASES="$(printf '%s\n' \
+  "STORAGE_POSTGRES_DSN=postgres://\$DATABASE_SERVER_USER:\$DATABASE_PASSWORD@\$DATABASE_SERVER_HOST:5432/\$DATABASE_DB?sslmode=${PG_SSLMODE}")"
+
+# component-body (AddComponentRequest) via jq -> correcte JSON-escaping.
+component_body() {  # $1=name $2=image $3=port $4=env  [$5=services_json=[]]  [$6=aliases=""]
+  jq -n --arg name "$1" --arg image "$2" --argjson port "$3" --arg env "$4" \
+        --argjson services "${5:-[]}" --arg aliases "${6:-}" --arg dep "${DEPLOYMENT}" \
+    '{name:$name, image:$image, port:$port, env_vars:$env, deployment_names:[$dep]}
+     + (if ($services|length) > 0 then {services:$services} else {} end)
+     + (if $aliases == "" then {} else {aliases:$aliases} end)'
+}
+
+DEPLOY_BODY="$(jq -n --arg d "${DEPLOYMENT}" --arg cf "${CLONE_FROM}" \
+  --arg mgr "${MANAGER_IMAGE}" --arg ctl "${CONTROLLER_IMAGE}" --arg inway "${INWAY_IMAGE}" \
+  --arg txlog "${TXLOG_IMAGE}" \
+  '{deploymentName:$d, domain_format:"component-deployment-project",
+    components:[{reference:"mgzmgr", image:$mgr}, {reference:"mgzctl", image:$ctl}, {reference:"mgzinway", image:$inway}, {reference:"mgztxlog", image:$txlog}]}
+   + (if $cf=="" then {} else {cloneFrom:$cf, forceClone:false} end)')"
+
+MGZMGR_BODY="$(component_body mgzmgr "${MANAGER_IMAGE}" 8443 "${MGZMGR_ENV}" '["postgresql-database"]' "${MGZMGR_ALIASES}")"
+MGZCTL_BODY="$(component_body mgzctl "${CONTROLLER_IMAGE}" 8080 "${MGZCTL_ENV}" '["postgresql-database"]' "${MGZCTL_ALIASES}")"
+MGZINWAY_BODY="$(component_body mgzinway "${INWAY_IMAGE}" 8443 "${MGZINWAY_ENV}" '[]' "${MGZINWAY_ALIASES}")"
+MGZTXLOG_BODY="$(component_body mgztxlog "${TXLOG_IMAGE}" 8443 "${MGZTXLOG_ENV}" '["postgresql-database"]' "${MGZTXLOG_ALIASES}")"
+
+# ---- plan: toon alleen ----
+if [ "${MODE}" = plan ]; then
+  echo "### deployment (:upsert-deployment)"; echo "${DEPLOY_BODY}"
+  echo "### component mgzmgr (manager + managed Postgres)"; echo "${MGZMGR_BODY}"
+  echo "### component mgzctl (controller + managed Postgres)"; echo "${MGZCTL_BODY}"
+  echo "### component mgzinway (inway)"; echo "${MGZINWAY_BODY}"
+  echo "### component mgztxlog (txlog-api + managed Postgres)"; echo "${MGZTXLOG_BODY}"
+  echo "Hostnamen (deployment '${DEPLOYMENT}'): mgzmgr=${MGZMGR_HOST_DISPLAY} mgzctl=${MGZCTL_HOST_DISPLAY} mgzinway=${MGZINWAY_HOST_DISPLAY} mgztxlog=${MGZTXLOG_HOST_DISPLAY}"
+  echo "Directory-manager (repo A, extern): ${DIRECTORY_MANAGER_HOST}"
+  echo "Upstream naar de app (ingress-URL, cross-deployment): ${MAGAZIJNA_UPSTREAM_URL}"
+  exit 0
+fi
+
+API="${BASE}/api/v2/projects/${PROJECT}"
+resp="$(mktemp)"; trap 'rm -f "${resp}"' EXIT
+hdr=(-H "X-API-Key: ${ZAD_API_KEY}")
+
+poll_task() {  # $1=task_id
+  local id="$1" i status
+  for i in $(seq 1 45); do
+    # --fail: HTTP 4xx/5xx op de tasks-API mag niet als "nog bezig" (status=null) tellen; retry.
+    if ! curl -sS --fail "${hdr[@]}" "${BASE}/api/tasks/${id}" -o "${resp}"; then
+      echo "  task ${id}: tasks-API HTTP-fout (poging ${i}/45) — retry" >&2
+      sleep 2; continue
+    fi
+    status="$(jq -r '.status' "${resp}")"
+    case "${status}" in
+      completed) echo "  task ${id}: completed"; return 0 ;;
+      failed)    echo "  task ${id}: FAILED -> $(jq -r '.error_message // .result.error' "${resp}")" >&2; return 1 ;;
+      *)         sleep 2 ;;
+    esac
+  done
+  echo "  task ${id}: nog bezig na ~90s (async ArgoCD-sync) — niet geblokkeerd, check later met 'validate'." >&2
+  return 0
+}
+
+post() {  # $1=label $2=path $3=body
+  echo "POST ${2}  (${1})"
+  local code; code="$(curl -sS "${hdr[@]}" -H 'Content-Type: application/json' \
+    -X POST --data "${3}" -o "${resp}" -w '%{http_code}' "${API}${2}")"
+  echo "  -> HTTP ${code}"
+  case "${code}" in 2*) ;; *) jq . "${resp}" 2>/dev/null || cat "${resp}"; return 1 ;; esac
+  local tid; tid="$(jq -r '.task_id // empty' "${resp}")"
+  # if/then/else zodat poll_task's non-zero (FAILED-task) propageert i.p.v. gemaskeerd door `|| {…}`.
+  if [ -n "${tid}" ]; then
+    poll_task "${tid}"
+  else
+    jq . "${resp}"
+  fi
+}
+
+# ---- apply ----
+echo "== validate =="
+code="$(curl -sS "${hdr[@]}" -o "${resp}" -w '%{http_code}' "${API}/deployments")"
+[ "${code}" = 200 ] || { echo "auth/connectie faalt (HTTP ${code})"; cat "${resp}"; exit 1; }
+echo "auth OK — deployments + componenten:"
+jq -r '.deployments[]? | "  - \(.name): \([.components[]?.reference] | join(", "))"' "${resp}" 2>/dev/null || true
+if [ "${MODE}" = validate ]; then echo "validate OK (read-only, niets gemuteerd)."; exit 0; fi
+
+echo "== upsert deployment '${DEPLOYMENT}' =="
+post "deployment" "/:upsert-deployment" "${DEPLOY_BODY}"
+
+echo "== componenten aanmaken/bijwerken =="
+post "mgzmgr"   "/components" "${MGZMGR_BODY}"
+post "mgzctl"   "/components" "${MGZCTL_BODY}"
+post "mgzinway" "/components" "${MGZINWAY_BODY}"
+post "mgztxlog" "/components" "${MGZTXLOG_BODY}"
+
+# De EERSTE :upsert-deployment (hierboven) rolt de pods uit MET de config van de vórige run — de
+# POST /components hierna zet de nieuwe env pas ná die rollout. Doe daarom NOG één :upsert-deployment
+# zodat de pods opnieuw uitrollen met de zojuist gezette component-config (anders loopt de env één
+# deploy achter). Zo hoeven bestaande componenten NIET verwijderd te worden (cert-attachments blijven).
+echo "== deployment opnieuw uitrollen met verse component-config =="
+post "deployment (re-roll)" "/:upsert-deployment" "${DEPLOY_BODY}"
+
+# Diagnose: bevestig wat er ná de apply daadwerkelijk als deployment `${DEPLOYMENT}` bestaat
+# (een 202 op :upsert-deployment betekent "geaccepteerd", niet per se "zichtbaar als deployment").
+echo "== staat na apply: deployment '${DEPLOYMENT}' =="
+if curl -sS "${hdr[@]}" -o "${resp}" "${API}/deployments"; then
+  if jq -e --arg d "${DEPLOYMENT}" '.deployments[]? | select(.name==$d)' "${resp}" >/dev/null 2>&1; then
+    echo "  gevonden:"
+    jq -r --arg d "${DEPLOYMENT}" '.deployments[]? | select(.name==$d)
+      | "  name=\(.name) status=\(.status // "?") issues=\(.issues // "?") componenten=\([.components[]?.reference] | join(","))"' "${resp}"
+  else
+    echo "  NIET in /deployments — deployment '${DEPLOYMENT}' bestaat (nog) niet ondanks 202." >&2
+    echo "  alle deployments:" >&2
+    jq -r '.deployments[]? | "    - \(.name) [\(.status // "?")]"' "${resp}" >&2 || true
+  fi
+fi
+
+echo "Klaar. Nog handmatig (UI): bijlagen (certs op /etc/fsc/...) + Publicatie op het web modus 2 op mgzmgr."
+echo "Hostnamen: mgzmgr=${MGZMGR_HOST_DISPLAY} mgzctl=${MGZCTL_HOST_DISPLAY} mgzinway=${MGZINWAY_HOST_DISPLAY} mgztxlog=${MGZTXLOG_HOST_DISPLAY}"
