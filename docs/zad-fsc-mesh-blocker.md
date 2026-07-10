@@ -89,6 +89,12 @@ De externe mesh (manager + inway op `:443`, SNI-passthrough) werkt al en hoeft n
 - **Adressen re-pointen in de deploy** helpt niet: de interne poort bestáát niet cluster-intern.
 - **Losse k8s-Services aanmaken** kan niet met onze rechten (default-SA: 403 op `list services`;
   we hebben alleen de ZAD-UI: image + command + één poort).
+- **Het multi-poort-veld in de ZAD-UI materialiseert niet.** Meerdere poorten opgeven op een
+  component levert géén extra Service-poort op: de door ZAD gegenereerde ArgoCD-manifests bevatten
+  alleen de gepubliceerde poort (8080 voor `mgzctl`) — 9443/9444 komen in **geen enkele** YAML voor.
+  De UI-edit veroorzaakt bovendien drift → ArgoCD OutOfSync/Degraded. De GitOps-repo is
+  ZAD-gegenereerd en niet handmatig te bewerken, dus ook geen Service-manifest zelf toe te voegen.
+  Daarmee zijn alle self-service-routes uitgeput.
 - **Co-locatie tot loopback** (meerdere FSC-binaries in één component) lost het niet op: manager en
   inway hebben elk een eigen publieke mesh-hostnaam nodig, en één component = één Route/hostnaam.
 - **Tweede FSC-instance op dezelfde DB** puur om een interne poort te exposen is niet
