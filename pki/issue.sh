@@ -19,6 +19,12 @@ INTERNAL_CA_SPEC="${BASE_DIR}/internal-ca.json"
 FORCE=0
 [ "${1:-}" = "-f" ] && FORCE=1
 
+# 0. csr.json's (her)genereren uit de ZAD-topologie-env (ZAD_PROJECT/-DEPLOYMENT/-BASE_DOMAIN).
+# Zo dragen de internal-certs altijd de juiste Service-DNS-SAN's voor het actieve project — een
+# projectwissel is daarmee env-var-only (geen handmatige csr-edits). Zonder overrides is de uitvoer
+# identiek aan de gecommitte csr's (defaults = huidige project). Zie gen-csr.sh.
+"${BASE_DIR}/gen-csr.sh"
+
 # 1. Per-peer internal-CA root (self-signed). Eén per peer-map onder pki/peers/.
 for PEER_DIR in "${BASE_DIR}"/peers/*/; do
   PEER="$(basename "${PEER_DIR}")"

@@ -60,9 +60,15 @@ De ZAD Operations Manager v2-API heeft niet-triviaal gedrag. Deze punten kostten
   echt via de API zetten, dan moet de component opnieuw aangemaakt worden — maar dat kost de
   cert-attachments (UI-only per component), dus in de praktijk: **env in de UI**.
 - **Geen `$DEPLOYMENT_NAME`-substitutie gebruiken.** De deployment is vast (`test`), dus
-  `upsert-peer.sh` lost alle inter-component-hostnamen concreet op en zet ze in `env_vars`. Alleen
-  de managed-Postgres-DSN leunt op ZAD's `$DATABASE_*` (in `aliases`) — dat is het enige dat pas
-  op deploy-tijd bekend is.
+  `upsert-peer.sh` lost alle inter-component-hostnamen concreet op en zet ze in `env_vars`. Sinds de
+  self-hosted Postgres (`mgzpg`, 2026-07-15) is óók de DB-DSN concreet — geen ZAD `$DATABASE_*` /
+  aliases meer nodig.
+- **DB = self-hosted `mgzpg`, niet ZAD-managed.** Eén Postgres-component, één database, drie
+  geïsoleerde schema's (`manager`/`controller`/`txlog`) via `deploy/zad/postgres-init.sql`
+  (init-attachment op `/docker-entrypoint-initdb.d`). Elke FSC-component verbindt met een eigen
+  `search_path` zodat de golang-migrate-tellers niet botsen (anders `42P01` op `controller.services`).
+  Wachtwoord via `ZAD_PG_PASSWORD` (verplicht bij `apply`, niet committen). manager migreert via de
+  wrapper; controller/txlog migreren los (zelfde `search_path`).
 - **txlog is verplicht.** Een niet-directory manager faalt hard op een lege `TX_LOG_API_ADDRESS`
   (`tx-log-api-address is required...`). Er draait dus een `mgztxlog`-component (eigen managed
   Postgres, internal-PKI mTLS).
@@ -73,9 +79,12 @@ De ZAD Operations Manager v2-API heeft niet-triviaal gedrag. Deze punten kostten
     2 blokken: leaf + intermediate). Een leaf-only mount geeft dezelfde keten-fout op de root.
   - `TLS_GROUP_ROOT_CERT` = de group-root; internal-`TLS_ROOT_CERT` = de internal-CA-root. Niet
     verwisselen.
-- **Mesh + interne poorten:** de externe/mesh-API loopt over de `:443`-ingress (SNI-passthrough,
-  "Publicatie op het web" modus 2). De interne FSC-API's (`:9443`/`:9444`) via de ingress bereiken
-  is nog een open punt — verifieer de registratie-/txlog-calls bij het booten.
+- **Mesh + interne poorten (OPGELOST 2026-07-13):** de externe/mesh-API loopt over de `:443`-ingress
+  (SNI-passthrough, "Publicatie op het web" modus 2). De interne FSC-API's (`:9443`/`:9444`) lopen
+  sinds de ZAD-multi-poort-fix over de cluster-Service-DNS `test-<comp>:<poort>` (elke poort uit de
+  component-`ports`-array krijgt een eigen ClusterIP-Service) — NIET meer via de `:443`-ingress. De
+  internal-certs dragen daarom `test-<comp>` (+ svc-FQDN) als SAN. Zie `docs/zad-fsc-mesh-blocker.md`
+  (resolutie) + `deploy/zad/upsert-peer.sh`.
 
 ## Repo-structuur
 
@@ -106,8 +115,10 @@ docs/                design.md (ontwerp + ZAD-bevindingen)
 ## Build & test
 
 ```bash
-# PKI (vereist cfssl):
+# PKI (vereist cfssl): issue.sh roept gen-csr.sh aan -> csr-SAN's uit de ZAD-topologie-env.
 cd pki && ./issue.sh && ./gen-crl.sh && ./verify.sh && ./zad-bundle.sh magazijn-a
+# Projectwissel = env-var-only: export ZAD_PROJECT=... (evt. ZAD_DEPLOYMENT/-BASE_DOMAIN), dan
+# ./issue.sh -f (regenereert csr's) + zad-bundle + upsert-peer — beide lezen dezelfde ZAD_*-vars.
 
 # Lokale proof (vereist Docker):
 cd deploy/local && cp .env.example .env && docker compose up -d && ./run-smokes.sh

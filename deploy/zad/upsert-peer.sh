@@ -10,7 +10,7 @@
 # Model: de peer draait in de deployment `test` van het eigen project. Doordat het een eigen project
 # is, is er geen app-deployment om te overschrijven (project-isolatie i.p.v. deployment-isolatie).
 # `:upsert-deployment` zet per component de {reference,image} en updatet het deployment;
-# POST /components verrijkt elke component met env_vars/port/services/aliases.
+# POST /components verrijkt elke component met env_vars/ports/services/aliases.
 #
 # BELANGRIJK — `:upsert-deployment` maakt géén NIEUW deployment aan (geeft wel HTTP 202, maar het
 # deployment verschijnt niet in /deployments); het UPDATET alleen een bestaand deployment. `test` is
@@ -21,10 +21,11 @@
 # NIET via de API (UI-only): bijlagen (cert-mount) + "Publicatie op het web" (passthrough-TLS) —
 # zie cert-manifest.md.
 #
-# DB: elke component met een eigen managed Postgres (mgzmgr, mgzctl, mgztxlog) krijgt zijn
-# STORAGE_POSTGRES_DSN via ZAD-substitutievars ($DATABASE_*), in de `aliases`-body — die vars zijn
-# pas bij deploy-tijd bekend en kunnen dus niet in bash worden opgelost. Dat is het ENIGE dat in
-# aliases hoeft.
+# DB: sinds 2026-07-15 draaien we een EIGEN postgres-component `mgzpg` (self-hosted) i.p.v. ZAD's
+# managed Postgres — die laat ons de init/schema's niet inrichten. mgzmgr/mgzctl/mgztxlog krijgen een
+# CONCRETE STORAGE_POSTGRES_DSN naar `mgzpg:5432` (in env_vars, geen ZAD $DATABASE_*-substitutie meer,
+# dus aliases zijn leeg), elk met een eigen `search_path`-schema. Het wachtwoord komt uit ZAD_PG_PASSWORD
+# (verplicht bij apply, niet gecommit). Zie postgres-init.sql voor de 3 schema's.
 #
 # BELANGRIJK — ZAD past component-config (env_vars/aliases) alleen bij COMPONENT-CREATIE toe, niet
 # bij een re-POST op een bestaande component (bewezen: een tx-log-adres dat pas in een tweede deploy
@@ -49,7 +50,7 @@
 set -euo pipefail
 
 MODE="${1:?usage: upsert-peer.sh <validate|plan|apply> [deployment=test] [tag=v1.43.7]}"
-DEPLOYMENT="${2:-test}"
+DEPLOYMENT="${2:-${ZAD_DEPLOYMENT:-test}}"       # arg wint; anders ZAD_DEPLOYMENT (spoort met pki/gen-csr.sh)
 IMAGE_TAG="${3:-v1.43.7}"                        # OpenFSC stock-tag (controller/inway; default voor de manager-wrapper)
 MANAGER_TAG="${ZAD_MANAGER_TAG:-${IMAGE_TAG}}"   # manager-migrate (ghcr) kan een eigen tag hebben
 PROJECT="${ZAD_PROJECT:-mpfoa-e01}"
@@ -58,16 +59,34 @@ BASE_DOMAIN="${ZAD_BASE_DOMAIN:-rig.prd1.gn2.quattro.rijksapps.nl}"
 PG_SSLMODE="${ZAD_PG_SSLMODE:-disable}"          # managed DB intra-cluster: plaintext (zoals berichtenbox-JDBC)
 CLONE_FROM="${ZAD_PEER_CLONE_FROM:-}"            # leeg = geen clone; `test` bestaat doorgaans al als project-default
 
+# --- Self-hosted Postgres (component mgzpg) ---------------------------------------------------------
+# ZAD's managed Postgres laat ons het schema/init niet inrichten (geen init-scripts, geen CREATE
+# SCHEMA-rechten op eigen voorwaarden). Daarom draaien we een EIGEN postgres-component `mgzpg` die we
+# volledig beheren: één database met drie geïsoleerde schema's (manager/controller/txlog), aangemaakt
+# door deploy/zad/postgres-init.sql (UI-attachment op /docker-entrypoint-initdb.d). manager/controller/
+# txlog verbinden hier met een eigen search_path, zodat hun golang-migrate `schema_migrations`-tellers
+# niet botsen (anders skipt de controller-migratie -> 42P01 op controller.services).
+PG_USER="${ZAD_PG_USER:-fsc}"
+PG_DB="${ZAD_PG_DB:-fsc}"
+PG_PASSWORD="${ZAD_PG_PASSWORD:-__SET_ZAD_PG_PASSWORD__}"   # concreet bij apply (verplicht, zie check onder); nooit committen
+# search_path per component. `-` i.p.v. `:-` zodat ZAD_*_SCHEMA="" écht leeg blijft (dan geen search_path
+# in de DSN -> component gebruikt public). De namen moeten sporen met postgres-init.sql.
+MGR_SCHEMA="${ZAD_MGR_SCHEMA-manager}"
+CTL_SCHEMA="${ZAD_CTL_SCHEMA-controller}"
+TXLOG_SCHEMA="${ZAD_TXLOG_SCHEMA-txlog}"
+
 case "${MODE}" in validate|plan|apply) ;; *) echo "mode = validate | plan | apply"; exit 1 ;; esac
 case "${DEPLOYMENT}" in ""|*[!a-z0-9-]*) echo "ongeldige deployment: '${DEPLOYMENT}'"; exit 1 ;; esac
 case "${IMAGE_TAG}" in ""|*[!A-Za-z0-9._-]*) echo "ongeldige image_tag: '${IMAGE_TAG}'"; exit 1 ;; esac
 case "${MANAGER_TAG}" in ""|*[!A-Za-z0-9._-]*) echo "ongeldige ZAD_MANAGER_TAG: '${MANAGER_TAG}'"; exit 1 ;; esac
 [ "${MODE}" = apply ] && : "${ZAD_API_KEY:?zet ZAD_API_KEY in je env}"
+[ "${MODE}" = apply ] && : "${ZAD_PG_PASSWORD:?zet ZAD_PG_PASSWORD in je env (wachtwoord voor de self-hosted mgzpg-Postgres)}"
 
 MANAGER_IMAGE="ghcr.io/minbzk/moza-fsc-testnet/manager-migrate:${MANAGER_TAG}"
 CONTROLLER_IMAGE="docker.io/federatedserviceconnectivity/controller:${IMAGE_TAG}"
 INWAY_IMAGE="docker.io/federatedserviceconnectivity/inway:${IMAGE_TAG}"
 TXLOG_IMAGE="docker.io/federatedserviceconnectivity/txlog-api:${IMAGE_TAG}"
+POSTGRES_IMAGE="${ZAD_POSTGRES_IMAGE:-docker.io/library/postgres:17}"   # self-hosted DB (spiegelt deploy/local)
 
 # Concrete hostnamen voor déze (vaste) deployment — zowel voor de plan-/apply-output als, direct,
 # voor de inter-component-adressen in de env_vars-blobs. Geen $DEPLOYMENT_NAME-substitutie: de
@@ -77,6 +96,20 @@ MGZMGR_HOST_DISPLAY="mgzmgr-${DEPLOYMENT}-${PROJECT}.${BASE_DOMAIN}"
 MGZCTL_HOST_DISPLAY="mgzctl-${DEPLOYMENT}-${PROJECT}.${BASE_DOMAIN}"
 MGZINWAY_HOST_DISPLAY="mgzinway-${DEPLOYMENT}-${PROJECT}.${BASE_DOMAIN}"
 MGZTXLOG_HOST_DISPLAY="mgztxlog-${DEPLOYMENT}-${PROJECT}.${BASE_DOMAIN}"
+
+# Cluster-INTERNE Service-DNS (sinds de ZAD-multi-poort-fix, 2026-07-13). Elke component exposet nu
+# ál zijn `ports.inbound` als ClusterIP-Service-poort; de Service heet `<deployment>-<component>` en
+# is intern bereikbaar als `<deployment>-<component>:<poort>` (bv. `test-mgzmgr:9443`). De interne
+# FSC-edges (controller↔manager, inway→manager/controller, →txlog) lopen hierover — NIET meer over de
+# publieke `:443`-ingress, waardoor ze op de interne-PKI-poort met de juiste CA landen (dat lost de
+# eerdere `x509: certificate signed by unknown authority` op). Alleen de EXTERNE mesh (SELF_ADDRESS,
+# directory) blijft op `:443` (SNI-passthrough). De internal-certs dragen deze namen als SAN (zie de
+# csr.json's + cert-manifest.md). Kort + intra-namespace; geen $DEPLOYMENT_NAME-substitutie nodig.
+MGZMGR_SVC="${DEPLOYMENT}-mgzmgr"
+MGZCTL_SVC="${DEPLOYMENT}-mgzctl"
+MGZINWAY_SVC="${DEPLOYMENT}-mgzinway"
+MGZTXLOG_SVC="${DEPLOYMENT}-mgztxlog"
+MGZPG_SVC="${DEPLOYMENT}-mgzpg"                  # self-hosted Postgres, intern op :5432
 
 # Repo A's directory-deployment op ZAD (project mft-tp9, deployment "test" — zie upsert-directory.sh
 # se defaults). TODO(verifieer bij de echte apply): bevestig dat dit nog steeds de actieve
@@ -121,16 +154,15 @@ MGZMGR_ENV="$(printf '%s\n' \
   "TLS_INTERNAL_UNAUTHENTICATED_KEY=/etc/fsc/internal/magazijn-a/manager/key.pem" \
   "SELF_ADDRESS=https://${MGZMGR_HOST_DISPLAY}:443" \
   "DIRECTORY_MANAGER_ADDRESS=https://${DIRECTORY_MANAGER_HOST}:443" \
-  "CONTROLLER_REGISTRATION_API_ADDRESS=https://${MGZCTL_HOST_DISPLAY}:443" \
-  "TX_LOG_API_ADDRESS=https://${MGZTXLOG_HOST_DISPLAY}:443")"
+  "CONTROLLER_REGISTRATION_API_ADDRESS=https://${MGZCTL_SVC}:9443" \
+  "TX_LOG_API_ADDRESS=https://${MGZTXLOG_SVC}:8443")"
 
-# Aliases = ALLEEN wat een ZAD-substitutievar ($DATABASE_*) nodig heeft: de managed-Postgres-DSN,
-# want die creds zijn pas bij deploy-tijd bekend. \$ houdt ze letterlijk (ZAD vult ze in, niet de
-# shell). De inter-component-adressen staan hierboven concreet in env_vars — geen $DEPLOYMENT_NAME
-# nodig want de deployment is vast, en zo hoeven ze niet op ZAD's aliases-substitutie te leunen.
-# :443 = de mesh-poort (ingress SNI-passthrough -> pod :8443); OpenFSC eist een expliciete poort.
-MGZMGR_ALIASES="$(printf '%s\n' \
-  "STORAGE_POSTGRES_DSN=postgres://\$DATABASE_SERVER_USER:\$DATABASE_PASSWORD@\$DATABASE_SERVER_HOST:5432/\$DATABASE_DB?sslmode=${PG_SSLMODE}")"
+# Sinds de self-hosted Postgres (mgzpg) is de STORAGE_POSTGRES_DSN concreet (geen ZAD $DATABASE_*-
+# substitutie meer) -> hij hoort in env_vars, niet in aliases. De DSN's worden hieronder aan elke
+# ENV toegevoegd (zie _pg_dsn). Aliases zijn daarmee leeg.
+# Poortkeuze adressen: EXTERNE mesh (SELF_ADDRESS, directory) op :443 (ingress SNI-passthrough ->
+# pod :8443); INTERNE edges op de cluster-Service-DNS + interne-PKI-poort (9443/9444, txlog 8443).
+MGZMGR_ALIASES=""
 
 MGZCTL_ENV="$(printf '%s\n' \
   "LOG_TYPE=live" "LOG_LEVEL=info" "AUDITLOG_TYPE=stdout" \
@@ -146,10 +178,8 @@ MGZCTL_ENV="$(printf '%s\n' \
   "TLS_ROOT_CERT=/etc/fsc/internal/magazijn-a/ca/root.pem" \
   "TLS_CERT=/etc/fsc/internal/magazijn-a/controller/cert.pem" \
   "TLS_KEY=/etc/fsc/internal/magazijn-a/controller/key.pem" \
-  "MANAGER_ADDRESS_INTERNAL=https://${MGZMGR_HOST_DISPLAY}:443")"
-# mgzctl heeft een eigen managed Postgres (los van mgzmgr's DB) -> eigen DSN-alias.
-MGZCTL_ALIASES="$(printf '%s\n' \
-  "STORAGE_POSTGRES_DSN=postgres://\$DATABASE_SERVER_USER:\$DATABASE_PASSWORD@\$DATABASE_SERVER_HOST:5432/\$DATABASE_DB?sslmode=${PG_SSLMODE}")"
+  "MANAGER_ADDRESS_INTERNAL=https://${MGZMGR_SVC}:9443")"
+MGZCTL_ALIASES=""
 
 MGZINWAY_ENV="$(printf '%s\n' \
   "LOG_TYPE=live" "LOG_LEVEL=info" \
@@ -165,17 +195,16 @@ MGZINWAY_ENV="$(printf '%s\n' \
   "TLS_CERT=/etc/fsc/internal/magazijn-a/inway/cert.pem" \
   "TLS_KEY=/etc/fsc/internal/magazijn-a/inway/key.pem" \
   "SELF_ADDRESS=https://${MGZINWAY_HOST_DISPLAY}:443" \
-  "CONTROLLER_REGISTRATION_API_ADDRESS=https://${MGZCTL_HOST_DISPLAY}:443" \
-  "MANAGER_INTERNAL_UNAUTHENTICATED_ADDRESS=https://${MGZMGR_HOST_DISPLAY}:443" \
-  "TX_LOG_API_ADDRESS=https://${MGZTXLOG_HOST_DISPLAY}:443")"
+  "CONTROLLER_REGISTRATION_API_ADDRESS=https://${MGZCTL_SVC}:9443" \
+  "MANAGER_INTERNAL_UNAUTHENTICATED_ADDRESS=https://${MGZMGR_SVC}:9444" \
+  "TX_LOG_API_ADDRESS=https://${MGZTXLOG_SVC}:8443")"
 # Geen managed DB en geen $DATABASE_*-substitutie -> geen aliases nodig (alle adressen staan
 # concreet in env_vars hierboven).
 MGZINWAY_ALIASES=""
 
-# txlog-api (mirror van deploy/local): eigen managed Postgres, mTLS op de INTERNAL-PKI (geen
-# group-cert, geen GROUP_ID — group-agnostische opslag). De manager/inway loggen hier transacties;
-# OpenFSC eist een niet-lege TX_LOG_API_ADDRESS voor een niet-directory manager. txlog-hardening /
-# het echte data-pad is #728; dit is de minimale draaiende endpoint zodat de manager boot.
+# txlog-api (mirror van deploy/local): mTLS op de INTERNAL-PKI (geen group-cert, geen GROUP_ID —
+# group-agnostische opslag). De manager/inway loggen hier transacties; OpenFSC eist een niet-lege
+# TX_LOG_API_ADDRESS voor een niet-directory manager. txlog-hardening / het echte data-pad is #728.
 MGZTXLOG_ENV="$(printf '%s\n' \
   "LOG_TYPE=live" "LOG_LEVEL=info" \
   "LISTEN_ADDRESS=0.0.0.0:8443" \
@@ -183,38 +212,67 @@ MGZTXLOG_ENV="$(printf '%s\n' \
   "TLS_ROOT_CERT=/etc/fsc/internal/magazijn-a/ca/root.pem" \
   "TLS_CERT=/etc/fsc/internal/magazijn-a/txlog/cert.pem" \
   "TLS_KEY=/etc/fsc/internal/magazijn-a/txlog/key.pem")"
-MGZTXLOG_ALIASES="$(printf '%s\n' \
-  "STORAGE_POSTGRES_DSN=postgres://\$DATABASE_SERVER_USER:\$DATABASE_PASSWORD@\$DATABASE_SERVER_HOST:5432/\$DATABASE_DB?sslmode=${PG_SSLMODE}")"
+MGZTXLOG_ALIASES=""
+
+# --- self-hosted Postgres: component-env + concrete DSN per FSC-component -----------------------------
+# mgzpg draait het officiële postgres-image (config puur via POSTGRES_*-env, geen command nodig). PGDATA
+# in een subdir zodat een eventueel gemount volume met lost+found de init niet blokkeert. Het init-script
+# (3 schema's) is een UI-attachment op /docker-entrypoint-initdb.d (zie postgres-init.sql + cert-manifest).
+MGZPG_ENV="$(printf '%s\n' \
+  "POSTGRES_USER=${PG_USER}" \
+  "POSTGRES_PASSWORD=${PG_PASSWORD}" \
+  "POSTGRES_DB=${PG_DB}" \
+  "PGDATA=/var/lib/postgresql/data/pgdata")"
+
+# Concrete DSN naar de mgzpg-Service met per-component search_path. Toegevoegd aan env_vars (niet
+# aliases): geen ZAD-substitutie meer nodig. ${schema:+...} laat de search_path weg als het schema
+# leeg is (ZAD_*_SCHEMA="").
+_pg_dsn() {  # $1=search_path-schema (mag leeg)
+  printf 'STORAGE_POSTGRES_DSN=postgres://%s:%s@%s:5432/%s?sslmode=%s%s' \
+    "${PG_USER}" "${PG_PASSWORD}" "${MGZPG_SVC}" "${PG_DB}" "${PG_SSLMODE}" "${1:+&search_path=${1}}"
+}
+MGZMGR_ENV="${MGZMGR_ENV}"$'\n'"$(_pg_dsn "${MGR_SCHEMA}")"
+MGZCTL_ENV="${MGZCTL_ENV}"$'\n'"$(_pg_dsn "${CTL_SCHEMA}")"
+MGZTXLOG_ENV="${MGZTXLOG_ENV}"$'\n'"$(_pg_dsn "${TXLOG_SCHEMA}")"
 
 # component-body (AddComponentRequest) via jq -> correcte JSON-escaping.
-component_body() {  # $1=name $2=image $3=port $4=env  [$5=services_json=[]]  [$6=aliases=""]
-  jq -n --arg name "$1" --arg image "$2" --argjson port "$3" --arg env "$4" \
+# `ports` (array) sinds de ZAD-multi-poort-fix (2026-07-13): elke poort krijgt een Service-poort,
+# ports[0] blijft de ingress. Schema: "Use either 'port' or 'ports', not both" — wij gebruiken ports.
+component_body() {  # $1=name $2=image $3=ports_json $4=env  [$5=services_json=[]]  [$6=aliases=""]
+  jq -n --arg name "$1" --arg image "$2" --argjson ports "$3" --arg env "$4" \
         --argjson services "${5:-[]}" --arg aliases "${6:-}" --arg dep "${DEPLOYMENT}" \
-    '{name:$name, image:$image, port:$port, env_vars:$env, deployment_names:[$dep]}
+    '{name:$name, image:$image, ports:$ports, env_vars:$env, deployment_names:[$dep]}
      + (if ($services|length) > 0 then {services:$services} else {} end)
      + (if $aliases == "" then {} else {aliases:$aliases} end)'
 }
 
 DEPLOY_BODY="$(jq -n --arg d "${DEPLOYMENT}" --arg cf "${CLONE_FROM}" \
   --arg mgr "${MANAGER_IMAGE}" --arg ctl "${CONTROLLER_IMAGE}" --arg inway "${INWAY_IMAGE}" \
-  --arg txlog "${TXLOG_IMAGE}" \
+  --arg txlog "${TXLOG_IMAGE}" --arg pg "${POSTGRES_IMAGE}" \
   '{deploymentName:$d, domain_format:"component-deployment-project",
-    components:[{reference:"mgzmgr", image:$mgr}, {reference:"mgzctl", image:$ctl}, {reference:"mgzinway", image:$inway}, {reference:"mgztxlog", image:$txlog}]}
+    components:[{reference:"mgzpg", image:$pg}, {reference:"mgzmgr", image:$mgr}, {reference:"mgzctl", image:$ctl}, {reference:"mgzinway", image:$inway}, {reference:"mgztxlog", image:$txlog}]}
    + (if $cf=="" then {} else {cloneFrom:$cf, forceClone:false} end)')"
 
-MGZMGR_BODY="$(component_body mgzmgr "${MANAGER_IMAGE}" 8443 "${MGZMGR_ENV}" '["postgresql-database"]' "${MGZMGR_ALIASES}")"
-MGZCTL_BODY="$(component_body mgzctl "${CONTROLLER_IMAGE}" 8080 "${MGZCTL_ENV}" '["postgresql-database"]' "${MGZCTL_ALIASES}")"
-MGZINWAY_BODY="$(component_body mgzinway "${INWAY_IMAGE}" 8443 "${MGZINWAY_ENV}" '[]' "${MGZINWAY_ALIASES}")"
-MGZTXLOG_BODY="$(component_body mgztxlog "${TXLOG_IMAGE}" 8443 "${MGZTXLOG_ENV}" '["postgresql-database"]' "${MGZTXLOG_ALIASES}")"
+# Poorten per component (ports[0] = ingress). manager/controller exposen naast de ingress hun interne
+# mTLS-poorten (9443 auth, 9444 unauth) als eigen Service-poort; inway/txlog hebben alleen hun ene
+# listener; mgzpg alleen :5432. Geen managed-DB-binding meer ([]): de DB is nu de mgzpg-component.
+# Deze arrays moeten sporen met de LISTEN_ADDRESS_*-poorten in de env-blobs hierboven.
+MGZPG_BODY="$(component_body mgzpg "${POSTGRES_IMAGE}" '[5432]' "${MGZPG_ENV}" '[]' "")"
+MGZMGR_BODY="$(component_body mgzmgr "${MANAGER_IMAGE}" '[8443,9443,9444]' "${MGZMGR_ENV}" '[]' "${MGZMGR_ALIASES}")"
+MGZCTL_BODY="$(component_body mgzctl "${CONTROLLER_IMAGE}" '[8080,9443,9444]' "${MGZCTL_ENV}" '[]' "${MGZCTL_ALIASES}")"
+MGZINWAY_BODY="$(component_body mgzinway "${INWAY_IMAGE}" '[8443]' "${MGZINWAY_ENV}" '[]' "${MGZINWAY_ALIASES}")"
+MGZTXLOG_BODY="$(component_body mgztxlog "${TXLOG_IMAGE}" '[8443]' "${MGZTXLOG_ENV}" '[]' "${MGZTXLOG_ALIASES}")"
 
 # ---- plan: toon alleen ----
 if [ "${MODE}" = plan ]; then
   echo "### deployment (:upsert-deployment)"; echo "${DEPLOY_BODY}"
-  echo "### component mgzmgr (manager + managed Postgres)"; echo "${MGZMGR_BODY}"
-  echo "### component mgzctl (controller + managed Postgres)"; echo "${MGZCTL_BODY}"
+  echo "### component mgzpg (self-hosted Postgres + init-schema's)"; echo "${MGZPG_BODY}"
+  echo "### component mgzmgr (manager -> mgzpg schema '${MGR_SCHEMA:-public}')"; echo "${MGZMGR_BODY}"
+  echo "### component mgzctl (controller -> mgzpg schema '${CTL_SCHEMA:-public}')"; echo "${MGZCTL_BODY}"
   echo "### component mgzinway (inway)"; echo "${MGZINWAY_BODY}"
-  echo "### component mgztxlog (txlog-api + managed Postgres)"; echo "${MGZTXLOG_BODY}"
-  echo "Hostnamen (deployment '${DEPLOYMENT}'): mgzmgr=${MGZMGR_HOST_DISPLAY} mgzctl=${MGZCTL_HOST_DISPLAY} mgzinway=${MGZINWAY_HOST_DISPLAY} mgztxlog=${MGZTXLOG_HOST_DISPLAY}"
+  echo "### component mgztxlog (txlog-api -> mgzpg schema '${TXLOG_SCHEMA:-public}')"; echo "${MGZTXLOG_BODY}"
+  echo "Extern (mesh, :443): mgzmgr=${MGZMGR_HOST_DISPLAY} mgzinway=${MGZINWAY_HOST_DISPLAY}"
+  echo "Intern (cluster-Service-DNS): ${MGZMGR_SVC}:9443/:9444  ${MGZCTL_SVC}:9443/:9444  ${MGZTXLOG_SVC}:8443  db=${MGZPG_SVC}:5432  (mgzctl-UI: ${MGZCTL_HOST_DISPLAY}:443)"
   echo "Directory-manager (repo A, extern): ${DIRECTORY_MANAGER_HOST}"
   echo "Upstream naar de app (ingress-URL, cross-deployment): ${MAGAZIJNA_UPSTREAM_URL}"
   exit 0
@@ -270,6 +328,7 @@ echo "== upsert deployment '${DEPLOYMENT}' =="
 post "deployment" "/:upsert-deployment" "${DEPLOY_BODY}"
 
 echo "== componenten aanmaken/bijwerken =="
+post "mgzpg"    "/components" "${MGZPG_BODY}"      # DB eerst; de FSC-componenten retryen tot hij up is
 post "mgzmgr"   "/components" "${MGZMGR_BODY}"
 post "mgzctl"   "/components" "${MGZCTL_BODY}"
 post "mgzinway" "/components" "${MGZINWAY_BODY}"
@@ -297,5 +356,9 @@ if curl -sS "${hdr[@]}" -o "${resp}" "${API}/deployments"; then
   fi
 fi
 
-echo "Klaar. Nog handmatig (UI): bijlagen (certs op /etc/fsc/...) + Publicatie op het web modus 2 op mgzmgr."
-echo "Hostnamen: mgzmgr=${MGZMGR_HOST_DISPLAY} mgzctl=${MGZCTL_HOST_DISPLAY} mgzinway=${MGZINWAY_HOST_DISPLAY} mgztxlog=${MGZTXLOG_HOST_DISPLAY}"
+echo "Klaar. Nog handmatig (UI):"
+echo "  - mgzpg: init-script als bijlage op /docker-entrypoint-initdb.d/10-schemas.sql (zie postgres-init.sql)."
+echo "  - FSC-componenten: cert-bijlagen op /etc/fsc/... + Publicatie op het web modus 2 op mgzmgr/mgzinway."
+echo "  - controller/txlog migraties draaien (geen wrapper): 'migrate up --postgres-dsn <mgzpg-DSN met search_path>'."
+echo "Extern (mesh, :443): mgzmgr=${MGZMGR_HOST_DISPLAY} mgzinway=${MGZINWAY_HOST_DISPLAY}"
+echo "Intern (cluster-Service-DNS): ${MGZMGR_SVC}:9443/:9444  ${MGZCTL_SVC}:9443/:9444  ${MGZTXLOG_SVC}:8443  db=${MGZPG_SVC}:5432"

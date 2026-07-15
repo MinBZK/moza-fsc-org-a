@@ -83,7 +83,7 @@ ingress-URL** (https, :443), niet via intra-project-DNS.
 | manager | `mgzmgr` | announce bij de directory + ServicePublicationGrant; `manager-migrate`-wrapper migreert de peer-DB bij boot |
 | controller | `mgzctl` | dienst `berichtenmagazijn` aanmaken (Administration-API, `AUTHN_TYPE=none`) + beheer-UI + inway-registratie (Registration-API) |
 | inway | `mgzinway` | ingress vóór de `magazijna`-app-component (intra-project DNS); registreert bij de controller |
-| DB | ZAD managed Postgres (`postgresql-database`-service) | system-of-record manager + controller |
+| DB | `mgzpg` (self-hosted Postgres, één DB, 3 schema's) | system-of-record manager + controller + txlog |
 
 `txlog` draait lokaal mee (mirror van example-provider) maar wordt **niet** gehard voor #780;
 volledige tx-logging is #728. Op ZAD blijft `TX_LOG_API_ADDRESS` in eerste ronde leeg/minimaal.
@@ -143,16 +143,29 @@ magazijn-a                                   centrale kern (directory)
   (anders eenmalig leeg in de UI aanmaken). De `zad-deploy-peer.yml`-workflow deployt op elke
   PR-push naar `mpfoa-e01`/`test`.
 - **Interne-mTLS SAN — OPGELOST (least-privilege).** Elk internal-cert draagt nu zijn **eigen
-  concrete** ZAD-hostnaam (`mgzmgr-test-mpfoa-e01.<base-domain>` op de manager, `mgzctl-…` op de
-  controller, `mgzinway-…` op de inway) — géén domein-brede wildcard, zodat de certs niet voor het
-  hele gedeelde Rijks-hosting-domein geldig zijn. Bewezen met `verify.sh` + `openssl`. Verandert het
-  project of de deployment-naam, dan moeten de bijbehorende hostnamen als SAN opnieuw uitgegeven en
-  geüpload worden.
+  concrete** hostnamen: de publieke ZAD-hostnaam (`mgzmgr-test-mpfoa-e01.<base-domain>` op de
+  manager, `mgzctl-…`, `mgzinway-…`, `mgztxlog-…`) **plus** — sinds de multi-poort-fix — de
+  cluster-interne Service-DNS (`test-mgzmgr` + `test-mgzmgr.rig-prd-mpfoa-e01.svc.cluster.local`),
+  waarnaar het interne mTLS-verkeer sinds 2026-07-13 verbindt. Géén domein-brede wildcard (alle
+  SAN's zijn concrete namen), zodat de certs niet voor het hele gedeelde Rijks-hosting-domein geldig
+  zijn. Bewezen met `verify.sh` + `openssl`. Verandert het project of de deployment-naam, dan moeten
+  de bijbehorende publieke én Service-DNS-hostnamen als SAN opnieuw uitgegeven en geüpload worden.
 - **txlog is verplicht voor een niet-directory manager — toegevoegd.** OpenFSC v1.43.7 faalt hard
   op `tx-log-api-address is required when the manager does not function as the directory` als
   `TX_LOG_API_ADDRESS` leeg is. De eerdere aanname (txlog op ZAD leeglaten tot #728) klopt dus niet;
-  er draait nu een vierde component `mgztxlog` (txlog-api-image + eigen managed Postgres, internal-
-  PKI mTLS), en mgzmgr/mgzinway wijzen ernaar. txlog-*hardening* / het echte data-pad blijft #728.
+  er draait nu een component `mgztxlog` (txlog-api-image, internal-PKI mTLS), en mgzmgr/mgzinway
+  wijzen ernaar. txlog-*hardening* / het echte data-pad blijft #728.
+- **DB: self-hosted Postgres i.p.v. ZAD-managed (2026-07-15).** ZAD's managed Postgres laat ons de
+  init/schema's niet inrichten, en toen manager/controller/txlog één gedeelde DB kregen, botsten hun
+  golang-migrate `schema_migrations`-tellers: de controller-migratie zag de manager-versie, sloeg over,
+  en `controller.services` ontbrak (`42P01`). Oplossing: een eigen postgres-component `mgzpg` die we
+  volledig beheren — één database met **drie geïsoleerde schema's** (`manager`/`controller`/`txlog`),
+  aangemaakt door `deploy/zad/postgres-init.sql` (UI-attachment op `/docker-entrypoint-initdb.d`). Elke
+  FSC-component verbindt met een eigen `search_path` (concrete DSN in `env_vars`, geen ZAD
+  `$DATABASE_*` meer). Wachtwoord via `ZAD_PG_PASSWORD` (niet gecommit). De manager migreert bij boot
+  (wrapper); controller/txlog draaien hun `migrate up` los (zelfde `search_path`) — een
+  `controller-migrate`/`txlog-migrate`-wrapper (à la manager) is de nette vervolgstap. Aandachtspunt:
+  zonder persistent volume is `mgzpg` ephemeral (prima voor test; PVC voor een blijvende peer).
 - **`POST /components` werkt de env van een BESTAANDE component niet bij — env is UI-beheerd.**
   Bewezen: een `TX_LOG_API_ADDRESS` die na de eerste creatie werd gezet (via re-POST én via een
   extra re-roll-`:upsert-deployment`) bereikte de manager nooit — verse pods bleven
@@ -160,24 +173,25 @@ magazijn-a                                   centrale kern (directory)
   in zat. Dit spiegelt het app-model (zad-actions): de deploy-API beheert images/refs, runtime-env
   komt uit `clone-from`/de UI. Gevolg voor deze peer: de component-env wordt **in de UI** gezet/
   bijgewerkt (concrete waarden, geen `$DEPLOYMENT_NAME`-substitutie nodig want de deployment is vast
-  `test`/`mpfoa-e01`); alleen de managed-Postgres-DSN leunt op ZAD's `$DATABASE_*`. De workflow
+  `test`/`mpfoa-e01`); de Postgres-DSN is sinds de self-hosted `mgzpg` óók concreet (geen `$DATABASE_*`
+  meer). De workflow
   blijft betrouwbaar voor images/refs. Componenten NIET verwijderen om env te wijzigen — dan raak je
   de cert-attachments (UI-only per component) kwijt.
-- **Interne-mTLS poort/routering op ZAD — CONCLUSIEF GEBLOKKEERD (2026-07-10), zie
-  [`zad-fsc-mesh-blocker.md`](zad-fsc-mesh-blocker.md).** De interne FSC-API's luisteren op
-  `:9443`/`:9444`, maar een ZAD-component publiceert **precies één** inbound-poort (bevestigd in
-  het ZAD-OpenAPI-schema: `AddComponentRequest` heeft één `port`, geen `ports`-array) → per pod
-  één ClusterIP-Service op die poort. Gemeten in namespace `rig-prd-mpfoa-e01`: `test-mgzmgr`
-  exposet alleen 8443 (group-cert), `test-mgzctl` alleen 8080 (UI); `:9443`/`:9444` zijn
-  cluster-intern `closed`. De interne edges (controller→manager:9443,
-  manager/inway→controller:9443, inway→manager:9444) hebben dus geen bereikbaar adres; alleen
-  txlog werkt (enige poort = internal-listener). Adressen re-pointen helpt niet (de poort bestaat
-  cluster-intern niet), losse k8s-Services aanmaken kan niet (alleen ZAD-UI: image+command+één
-  poort), en publiceren buiten de mesh om via de manager's externe `/v1/contracts` faalt (dat is
-  de peer-sync-endpoint; verwacht een al-ondertekend contract — `400`/`500` bewezen). **Announce
-  (AC-3) lukt wél** (uitgaande boot-flow; peer staat in de directory `/v1/peers`), maar **AC-4
-  publiceren vereist een ZAD-platform-fix** (meerdere poorten of een extra cluster-interne Service
-  per component). Escalatie-aanvraag in `zad-fsc-mesh-blocker.md`.
+- **Interne-mTLS poort/routering op ZAD — OPGELOST (2026-07-13), zie
+  [`zad-fsc-mesh-blocker.md`](zad-fsc-mesh-blocker.md).** Was van 2026-07-10 t/m 2026-07-13
+  geblokkeerd: een ZAD-component publiceerde **precies één** inbound-poort, dus de interne FSC-API's
+  op `:9443`/`:9444` hadden geen ClusterIP-Service en waren cluster-intern onbereikbaar (`x509:
+  certificate signed by unknown authority` omdat het interne verkeer noodgedwongen over de
+  `:443`-group-ingress liep). Het RIG/ZAD-team heeft de **multi-poort-fix** uitgerold: een component
+  exposet nu **alle** poorten uit `ports.inbound` als Service-poort (`AddComponentRequest.ports`,
+  array; `ports[0]` blijft de ingress). Elke poort krijgt een Service `<deployment>-<component>`,
+  intern bereikbaar als `test-mgzmgr:9443` enz. Onze deploy is daarop aangepast: de interne edges
+  (controller→manager:9443, manager/inway→controller:9443, inway→manager:9444, →txlog:8443) wijzen
+  nu naar die cluster-Service-DNS i.p.v. `:443`, de internal-certs dragen `test-<comp>` (+ svc-FQDN)
+  als SAN, en `upsert-peer.sh` zendt per component de `ports`-array (mgzmgr `8443,9443,9444`; mgzctl
+  `8080,9443,9444`). De externe mesh (mgzmgr/mgzinway op `:443`, SNI-passthrough) blijft ongewijzigd.
+  Hiermee is **AC-4 (publiceren) gedeblokkeerd**: de extern gepubliceerde controller-UI kan nu
+  intern de manager op `:9443` bereiken en een servicePublication-contract laten ondertekenen.
 - **Echte magazijn-OIN in een publiek repo** — stond al in `application.properties`; akkoord,
   hier expliciet genoteerd.
 - **Cert-portal op ZAD** — repo-A-vervolg; buiten #780.

@@ -6,7 +6,9 @@
   },
   "hosts": [
     "controller.magazijn-a.fsc-test.local",
-    "mgzctl-test-mpfoa-e01.rig.prd1.gn2.quattro.rijksapps.nl"
+    "mgzctl-test-mpfoa-e01.rig.prd1.gn2.quattro.rijksapps.nl",
+    "test-mgzctl",
+    "test-mgzctl.rig-prd-mpfoa-e01.svc.cluster.local"
   ],
   "serialnumber": "00000001003214345000",
   "names": [

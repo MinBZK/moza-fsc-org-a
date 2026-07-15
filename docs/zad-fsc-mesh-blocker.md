@@ -1,5 +1,25 @@
 # Platform-blokkade — FSC interne mTLS-mesh vs. ZAD één-poort-model
 
+> ## ✅ OPGELOST — 2026-07-13
+>
+> Het RIG/ZAD-team heeft de gevraagde platform-capaciteit uitgerold: een component exposet nu **alle**
+> poorten uit `ports.inbound` als Service-poort (optie 1 hieronder). In de v2-API is het veld
+> `ports` (array) toegevoegd aan `AddComponentRequest` — `ports[0]` blijft de ingress. Er was ook een
+> bug (alleen de eerste poort kreeg een Service); die is gefixt en staat in productie. Elke poort
+> krijgt een Service `<deployment>-<component>`, intern bereikbaar als bv. `test-mgzmgr:9443`; in de
+> pod zijn `DEPLOYMENT_NAME`/`COMPONENT_NAME` beschikbaar om dat adres dynamisch te bouwen.
+>
+> **Wat aan onze kant is aangepast (deze repo):** de interne FSC-edges wijzen nu naar de
+> cluster-Service-DNS `test-<comp>:<interne-poort>` i.p.v. de `:443`-ingress (dat lost de
+> `x509`-fout op — intern verkeer landt op de interne-PKI-poort met de juiste CA); de internal-certs
+> dragen `test-<comp>` + de svc-FQDN als SAN; en `upsert-peer.sh` zendt per component de
+> `ports`-array. Zie `deploy/zad/upsert-peer.sh`, de csr.json's onder `pki/peers/magazijn-a/` en
+> `deploy/zad/verify-zad.md`. De externe mesh (`:443`, SNI-passthrough) is ongewijzigd. Daarmee is
+> **AC-4 (publiceren) gedeblokkeerd**: de externe controller-UI kan intern de manager op `:9443`
+> bereiken en een servicePublication-contract laten ondertekenen.
+>
+> De rest van dit document is bewaard als **historisch verslag** van de blokkade en het bewijs.
+
 > **Samenvatting voor het RIG/ZAD-platformteam:** een ZAD-component kan precies één inbound-poort
 > publiceren, waardoor er per pod maar één cluster-interne Service ontstaat. FSC-componenten
 > (`manager`, `controller`) luisteren op meerdere mTLS-poorten met verschillende cert-ketens die

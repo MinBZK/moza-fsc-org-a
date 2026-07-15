@@ -19,6 +19,11 @@ services) maar **geen bijlagen** — net als repo A's directory-deploy
    INTERNAL-CA blijft wél lokaal/self-signed (die maakt `issue.sh` per-peer aan).
 1. `pki/issue.sh` (vereist `cfssl`) — genereert `pki/out/magazijn-a/*` (group,
    getekend door fsc-testnet's intermediate) en `pki/internal/magazijn-a/*` (internal).
+   **Let op (multi-poort-fix, 2026-07-13):** de internal-cert-SAN's bevatten nu ook de
+   cluster-interne Service-DNS (`test-<comp>` + `test-<comp>.rig-prd-mpfoa-e01.svc.cluster.local`),
+   waarnaar het interne mTLS-verkeer verbindt. Draaide je `issue.sh` vóór deze wijziging, geef de
+   certs dan opnieuw uit met `issue.sh -f` (anders faalt de hostnaamverificatie op `test-mgzmgr:9443`
+   enz.) en upload de verse set opnieuw.
 2. `pki/zad-bundle.sh magazijn-a` (hangt af van stap 1) — verzamelt de
    upload-klare set in `pki/zad-upload/magazijn-a/` met een eigen `MANIFEST.md`
    (bestand → pod-pad → `TLS_*`-env-var, zie dat script voor de exacte `env_for()`-mapping).
@@ -72,9 +77,62 @@ net als in de lokale compose.
 | `internal/magazijn-a/txlog/cert.pem` | `internal/magazijn-a/txlog/cert.pem` | `TLS_CERT` |
 | `internal/magazijn-a/txlog/key.pem` | `internal/magazijn-a/txlog/key.pem` | `TLS_KEY` |
 
+## mgzpg (self-hosted Postgres) — géén cert, wél een init-script-attachment
+
+Sinds 2026-07-15 draait de peer een eigen postgres-component `mgzpg` (self-hosted) i.p.v. ZAD's
+managed Postgres, zodat we de schema-init zelf beheren (zie `docs/design.md` + `upsert-peer.sh`). Geen
+TLS-attachments (intra-cluster plaintext op `:5432`, `sslmode=disable`), maar wél één attachment: het
+init-script dat de 3 schema's aanmaakt.
+
+| Bijlage-pad (in de mgzpg-container) | Bronbestand (repo) | Werking |
+|-------------------------------------|--------------------|---------|
+| `/docker-entrypoint-initdb.d/10-schemas.sql` | `deploy/zad/postgres-init.sql` | postgres draait dit éénmalig bij lege PGDATA → `CREATE SCHEMA manager/controller/txlog` |
+
+Verder geen bijlagen op mgzpg. Het wachtwoord komt uit `ZAD_PG_PASSWORD` (env bij `apply`, niet in git);
+`POSTGRES_USER`/`POSTGRES_DB`/`PGDATA` staan als component-env.
+
+**Persistentie:** zonder gekoppeld persistent volume is de DB ephemeral — bij een nieuwe pod draait het
+init-script opnieuw en zijn de tabellen leeg (manager migreert vanzelf via de wrapper; controller/txlog
+moeten dan opnieuw migreren). Voor een blijvende peer: een persistent volume op `PGDATA` koppelen.
+
+**Schema-namen moeten sporen** met `ZAD_MGR_SCHEMA`/`ZAD_CTL_SCHEMA`/`ZAD_TXLOG_SCHEMA` in
+`upsert-peer.sh` (defaults manager/controller/txlog). Wijzig je de één, wijzig dan de ander mee.
+
+## Controller- en txlog-migraties draaien (geen wrapper)
+
+De manager migreert bij boot via de `manager-migrate`-wrapper. De controller en txlog draaien op hun
+stock-image en hebben **geen** migratiestap — draai die eenmalig (bv. een ZAD-job of exec in de pod)
+tegen `mgzpg`, mét dezelfde `search_path` als serve, anders landen de tabellen in het verkeerde schema:
+
+```
+/usr/local/bin/controller migrate up \
+  --postgres-dsn "postgres://<user>:<pass>@test-mgzpg:5432/fsc?sslmode=disable&search_path=controller"
+/usr/local/bin/txlog-api  migrate up \
+  --postgres-dsn "postgres://<user>:<pass>@test-mgzpg:5432/fsc?sslmode=disable&search_path=txlog"
+```
+
+Omdat elk component nu zijn eigen schema (dus eigen `schema_migrations`) heeft, draaien deze migraties
+vers vanaf versie 0 en ontstaan de ontbrekende tabellen (o.a. `controller.services`).
+
 ## Na het mounten
 
 Herstart (of laat ZAD herstarten na attachment-wijziging) elk component en controleer de boot-log
 op een TLS-laadfout — een fout pad of een verwisselde group/internal-cert faalt hard bij startup
 ("no such file", of een handshake-fout tegen de verkeerde CA). Ga daarna verder met
 `verify-zad.md`.
+
+## Bestaande componenten migreren naar de nieuwe env/poorten (multi-poort-fix)
+
+ZAD past `env_vars`/`ports` alléén bij component-**creatie** toe, niet bij een re-POST op een
+bestaande component (zie `design.md`). Bestaan de componenten al met de oude (`:443`-)config, dan
+zijn er twee routes om de nieuwe interne adressen + poorten door te voeren:
+
+- **Poorten los bijwerken via de API** (env blijft ongemoeid): `PATCH
+  /api/v2/projects/mpfoa-e01/components/<comp>` met body `{"ports":[…]}` (mgzmgr `[8443,9443,9444]`,
+  mgzctl `[8080,9443,9444]`). Zet daarnaast de interne adressen (`MANAGER_ADDRESS_INTERNAL` etc.)
+  in de **UI**, want env is UI-beheerd op een bestaande component. Cert-attachments blijven behouden.
+- **Component verwijderen + opnieuw aanmaken** (via `upsert-peer.sh apply`, die env+ports in één
+  keer zet): dan raak je de cert-attachments kwijt en moet je ze **opnieuw mounten** (deze tabellen).
+
+Na het her-uitgeven van de certs (`issue.sh -f`, want de SAN's zijn gewijzigd) is opnieuw uploaden
+sowieso nodig — dus in de praktijk is verwijderen + opnieuw aanmaken + herattachen de schoonste weg.
