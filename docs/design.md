@@ -67,7 +67,7 @@ uitbreiding), txlog-hardening/e2e-verantwoording (#728), en het echte data-pad d
 | App-component (inway-upstream) | `magazijna` (cross-project via ingress-URL) | repo B `deploy.yml` |
 | Dienst-naam in de directory | `berichtenmagazijn` | dit ontwerp |
 | FSC-images (pin) | `v1.43.7` (manager/inway/controller/directory-ui) | repo A |
-| manager-wrapper-image | `ghcr.io/minbzk/moza-fsc-testnet/manager-migrate:<tag>` | repo A |
+| migrate-wrapper-images | `ghcr.io/minbzk/moza-fsc-testnet/{manager,controller,txlog}-migrate:<tag>` | repo A |
 
 ## Architectuur
 
@@ -81,7 +81,7 @@ ingress-URL** (https, :443), niet via intra-project-DNS.
 | Component | ZAD-ref | Rol |
 |-----------|---------|-----|
 | manager | `mgzmgr` | announce bij de directory + ServicePublicationGrant; `manager-migrate`-wrapper migreert de peer-DB bij boot |
-| controller | `mgzctl` | dienst `berichtenmagazijn` aanmaken (Administration-API, `AUTHN_TYPE=none`) + beheer-UI + inway-registratie (Registration-API) |
+| controller | `mgzctl` | dienst `berichtenmagazijn` aanmaken (Administration-API, `AUTHN_TYPE=none`) + beheer-UI + inway-registratie (Registration-API); `controller-migrate`-wrapper migreert bij boot |
 | inway | `mgzinway` | ingress vóór de `magazijna`-app-component (intra-project DNS); registreert bij de controller |
 | DB | `mgzpg` (self-hosted Postgres, één DB, geïsoleerde migratie-tellers) | system-of-record manager + controller + txlog |
 
@@ -167,7 +167,8 @@ magazijn-a                                   centrale kern (directory)
   daarom **zonder** search_path (`ZAD_CTL_SCHEMA=""`), maakt z'n eigen `controller`-schema aan
   (schema-gekwalificeerde DDL) en houdt z'n teller in `public` (los van manager/txlog). Concrete DSN in
   `env_vars` (geen ZAD `$DATABASE_*` meer); wachtwoord via `ZAD_PG_PASSWORD` (niet gecommit). Manager en
-  controller migreren bij boot via een wrapper (`manager-migrate` / `controller-migrate`). Aandachtspunt:
+  manager/controller/txlog migreren bij boot via hun eigen wrapper-image
+  (`{manager,controller,txlog}-migrate`, `migrate up && serve`). Aandachtspunt:
   zonder persistent volume is `mgzpg` ephemeral (prima voor test; PVC voor een blijvende peer).
 - **`POST /components` werkt de env van een BESTAANDE component niet bij — env is UI-beheerd.**
   Bewezen: een `TX_LOG_API_ADDRESS` die na de eerste creatie werd gezet (via re-POST én via een

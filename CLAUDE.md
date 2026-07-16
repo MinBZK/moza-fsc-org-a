@@ -22,8 +22,11 @@ contract, trust-anchor, passthrough, SNI, txlog, announce.
   [OpenFSC](https://gitlab.com/rinis-oss/fsc/open-fsc) (EUPL-1.2, RINIS) consumeert via haar
   container-images (`manager`, `controller`, `inway`, `txlog-api`, gepind op `v1.43.7`).
 - **WEL**: onze test-PKI, peer-configuratie, ZAD-deploy (`upsert-peer.sh` + workflow), runbooks.
-- **Manager-migratie:** ZAD ondersteunt geen init-containers/args → migratie zit in een
-  wrapper-image `ghcr.io/minbzk/moza-fsc-testnet/manager-migrate` (`migrate up && serve`).
+- **Migratie-wrappers:** ZAD ondersteunt geen init-containers/args → de migratie zit in het image
+  zelf. manager/controller/txlog draaien elk een wrapper-image
+  `ghcr.io/minbzk/moza-fsc-testnet/{manager,controller,txlog}-migrate` (`migrate up && serve`); de
+  inway heeft geen DB en gebruikt het stock-image. Override per image met
+  `ZAD_{MANAGER,CONTROLLER,TXLOG}_IMAGE` of enkel de tag met `ZAD_{MANAGER,CONTROLLER,TXLOG}_TAG`.
 
 ## Identiteit
 
@@ -70,8 +73,8 @@ De ZAD Operations Manager v2-API heeft niet-triviaal gedrag. Deze punten kostten
   `/docker-entrypoint-initdb.d`). De **controller is de uitzondering**: mét `search_path` liep migratie
   #1 dirty vast — die draait ZONDER (`ZAD_CTL_SCHEMA=""`), maakt z'n eigen `controller`-schema aan en
   houdt z'n teller in `public`. Init-script maakt daarom alléén `manager` + `txlog` aan. Wachtwoord via
-  `ZAD_PG_PASSWORD` (verplicht bij `apply`, niet committen). manager + controller migreren bij boot via
-  een wrapper (`manager-migrate` / `controller-migrate`).
+  `ZAD_PG_PASSWORD` (verplicht bij `apply`, niet committen). manager/controller/txlog migreren bij boot
+  via hun eigen wrapper-image (`{manager,controller,txlog}-migrate`, `migrate up && serve`).
 - **txlog is verplicht.** Een niet-directory manager faalt hard op een lege `TX_LOG_API_ADDRESS`
   (`tx-log-api-address is required...`). Er draait dus een `mgztxlog`-component (eigen managed
   Postgres, internal-PKI mTLS).

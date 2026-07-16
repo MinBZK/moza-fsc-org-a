@@ -52,8 +52,10 @@ set -euo pipefail
 
 MODE="${1:?usage: upsert-peer.sh <validate|plan|apply> [deployment=test] [tag=v1.43.7]}"
 DEPLOYMENT="${2:-${ZAD_DEPLOYMENT:-test}}"       # arg wint; anders ZAD_DEPLOYMENT (spoort met pki/gen-csr.sh)
-IMAGE_TAG="${3:-v1.43.7}"                        # OpenFSC stock-tag (controller/inway; default voor de manager-wrapper)
-MANAGER_TAG="${ZAD_MANAGER_TAG:-${IMAGE_TAG}}"   # manager-migrate (ghcr) kan een eigen tag hebben
+IMAGE_TAG="${3:-v1.43.7}"                        # OpenFSC-versie: inway stock-image + default-tag voor de migrate-wrappers
+MANAGER_TAG="${ZAD_MANAGER_TAG:-${IMAGE_TAG}}"       # migrate-wrappers (ghcr) mogen een eigen tag hebben
+CONTROLLER_TAG="${ZAD_CONTROLLER_TAG:-${IMAGE_TAG}}"
+TXLOG_TAG="${ZAD_TXLOG_TAG:-${IMAGE_TAG}}"
 PROJECT="${ZAD_PROJECT:-mpfoa-e2w}"
 BASE="${ZAD_BASE:-https://zad.rijksapp.nl}"
 BASE_DOMAIN="${ZAD_BASE_DOMAIN:-rig.prd1.gn2.quattro.rijksapps.nl}"
@@ -84,13 +86,20 @@ case "${MODE}" in validate|plan|apply) ;; *) echo "mode = validate | plan | appl
 case "${DEPLOYMENT}" in ""|*[!a-z0-9-]*) echo "ongeldige deployment: '${DEPLOYMENT}'"; exit 1 ;; esac
 case "${IMAGE_TAG}" in ""|*[!A-Za-z0-9._-]*) echo "ongeldige image_tag: '${IMAGE_TAG}'"; exit 1 ;; esac
 case "${MANAGER_TAG}" in ""|*[!A-Za-z0-9._-]*) echo "ongeldige ZAD_MANAGER_TAG: '${MANAGER_TAG}'"; exit 1 ;; esac
+case "${CONTROLLER_TAG}" in ""|*[!A-Za-z0-9._-]*) echo "ongeldige ZAD_CONTROLLER_TAG: '${CONTROLLER_TAG}'"; exit 1 ;; esac
+case "${TXLOG_TAG}" in ""|*[!A-Za-z0-9._-]*) echo "ongeldige ZAD_TXLOG_TAG: '${TXLOG_TAG}'"; exit 1 ;; esac
 [ "${MODE}" = apply ] && : "${ZAD_API_KEY:?zet ZAD_API_KEY in je env}"
 [ "${MODE}" = apply ] && : "${ZAD_PG_PASSWORD:?zet ZAD_PG_PASSWORD in je env (wachtwoord voor de self-hosted mgzpg-Postgres)}"
 
-MANAGER_IMAGE="ghcr.io/minbzk/moza-fsc-testnet/manager-migrate:${MANAGER_TAG}"
-CONTROLLER_IMAGE="docker.io/federatedserviceconnectivity/controller:${IMAGE_TAG}"
+# manager/controller/txlog draaien een migrate-WRAPPER (`migrate up && serve`) i.p.v. het OpenFSC
+# stock-image: ZAD kent geen init-containers/args, dus de migratie moet in het image zelf zitten. De
+# wrappers staan naast manager-migrate in dezelfde ghcr-repo. Wijkt een pad af, override dan het hele
+# image met ZAD_MANAGER_IMAGE / ZAD_CONTROLLER_IMAGE / ZAD_TXLOG_IMAGE. De inway heeft geen DB en dus
+# geen migratie -> stock-image.
+MANAGER_IMAGE="${ZAD_MANAGER_IMAGE:-ghcr.io/minbzk/moza-fsc-testnet/manager-migrate:${MANAGER_TAG}}"
+CONTROLLER_IMAGE="${ZAD_CONTROLLER_IMAGE:-ghcr.io/minbzk/moza-fsc-testnet/controller-migrate:${CONTROLLER_TAG}}"
 INWAY_IMAGE="docker.io/federatedserviceconnectivity/inway:${IMAGE_TAG}"
-TXLOG_IMAGE="docker.io/federatedserviceconnectivity/txlog-api:${IMAGE_TAG}"
+TXLOG_IMAGE="${ZAD_TXLOG_IMAGE:-ghcr.io/minbzk/moza-fsc-testnet/txlog-migrate:${TXLOG_TAG}}"
 POSTGRES_IMAGE="${ZAD_POSTGRES_IMAGE:-docker.io/library/postgres:17}"   # self-hosted DB (spiegelt deploy/local)
 
 # Concrete hostnamen voor déze (vaste) deployment — zowel voor de plan-/apply-output als, direct,

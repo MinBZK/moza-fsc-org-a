@@ -92,7 +92,7 @@ Verder geen bijlagen op mgzpg. Het wachtwoord komt uit `ZAD_PG_PASSWORD` (env bi
 `POSTGRES_USER`/`POSTGRES_DB`/`PGDATA` staan als component-env.
 
 **Persistentie:** zonder gekoppeld persistent volume is de DB ephemeral — bij een nieuwe pod draait het
-init-script opnieuw en zijn de tabellen leeg (manager + controller migreren vanzelf via hun wrapper).
+init-script opnieuw en zijn de tabellen leeg (manager/controller/txlog migreren vanzelf via hun wrapper).
 Voor een blijvende peer: een persistent volume op `PGDATA` koppelen.
 
 **Schema-namen moeten sporen** met `ZAD_MGR_SCHEMA`/`ZAD_TXLOG_SCHEMA` in `upsert-peer.sh` (defaults
@@ -101,28 +101,28 @@ Voor een blijvende peer: een persistent volume op `PGDATA` koppelen.
 
 ## Migraties per component
 
-- **manager** — migreert bij boot via de `manager-migrate`-wrapper (`migrate up && serve`); teller in
-  schema `manager` (search_path), echte tabellen in `peers`/`contracts`.
-- **controller** — migreert via de `controller-migrate`-wrapper, **zonder search_path**: de controller
-  maakt z'n eigen `controller`-schema aan (schema-gekwalificeerde DDL) en houdt z'n teller in `public`.
-  Mét een vooraf aangemaakt `controller`-schema + `search_path=controller` liep migratie #1 dirty vast.
+Alle drie de DB-componenten draaien een migrate-**wrapper** (`migrate up && serve`) — geen losse
+migratiestap meer; `upsert-peer.sh` zet de wrapper-images (`{manager,controller,txlog}-migrate`).
 
-  ```
-  /usr/local/bin/controller migrate up \
-    --postgres-dsn "postgres://<user>:<pass>@test-mgzpg:5432/fsc?sslmode=disable"
-  ```
-
-- **txlog** — teller in schema `txlog` (search_path=txlog), echte tabellen in `transactionlog`.
-
-  ```
-  /usr/local/bin/txlog-api migrate up \
-    --postgres-dsn "postgres://<user>:<pass>@test-mgzpg:5432/fsc?sslmode=disable&search_path=txlog"
-  ```
+- **manager** — `manager-migrate`-wrapper; teller in schema `manager` (search_path), echte tabellen in
+  `peers`/`contracts`.
+- **controller** — `controller-migrate`-wrapper, **zonder search_path**: de controller maakt z'n eigen
+  `controller`-schema aan (schema-gekwalificeerde DDL) en houdt z'n teller in `public`. Mét een vooraf
+  aangemaakt `controller`-schema + `search_path=controller` liep migratie #1 dirty vast.
+- **txlog** — `txlog-migrate`-wrapper; teller in schema `txlog` (search_path=txlog), echte tabellen in
+  `transactionlog`.
 
 **Vastgelopen op `Dirty database version N`?** De vorige migratie brak halverwege af (onderbroken, of
-door meerdere replica's die om de migratie-lock vochten). Schoon de migratie-state van dát component op
-en herstart 'm zodat de wrapper vers migreert — voor de controller bleek: `DROP SCHEMA controller
-CASCADE` + de mgzctl-component herstarten (schaal desnoods tijdelijk naar 1 replica).
+door meerdere replica's die om de migratie-lock vochten). De wrapper herstelt dit niet zelf. Schoon de
+migratie-state van dát component op en herstart 'm zodat de wrapper vers migreert — voor de controller
+bleek: `DROP SCHEMA controller CASCADE` + de mgzctl-component herstarten (schaal desnoods tijdelijk naar
+1 replica). Los draaien kan ook, tegen `test-mgzpg` met de component-DSN (controller **zonder**,
+manager/txlog **mét** hun `search_path`):
+
+```
+/usr/local/bin/controller migrate up --postgres-dsn "postgres://<user>:<pass>@test-mgzpg:5432/fsc?sslmode=disable"
+/usr/local/bin/txlog-api  migrate up --postgres-dsn "postgres://<user>:<pass>@test-mgzpg:5432/fsc?sslmode=disable&search_path=txlog"
+```
 
 ## Na het mounten
 

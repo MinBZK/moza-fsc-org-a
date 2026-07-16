@@ -53,7 +53,8 @@ cert-contract resp. de lokale smokes.
 | `ZAD_MAGAZIJNA_DEPLOYMENT` | `test` | Deployment van de `magazijna`-app waar de inway-upstream naar wijst (cross-project via ingress-URL). Zet bv. `pr-140` om tegen een app-preview te testen. |
 | `ZAD_BASE` | `https://zad.rijksapp.nl` | Basis-URL van de ZAD v2 Operations Manager API. |
 | `ZAD_BASE_DOMAIN` | `rig.prd1.gn2.quattro.rijksapps.nl` | Base-domain voor de per-component mesh-hostnamen. |
-| `ZAD_MANAGER_TAG` | = het `tag`-argument | Losse override voor de manager-wrapper-tag (ghcr), los van de OpenFSC stock-tag voor controller/inway. |
+| `ZAD_MANAGER_TAG` / `ZAD_CONTROLLER_TAG` / `ZAD_TXLOG_TAG` | = het `tag`-argument | Losse tag-override per migrate-wrapper (ghcr `{manager,controller,txlog}-migrate`), los van de OpenFSC stock-tag voor de inway. |
+| `ZAD_MANAGER_IMAGE` / `ZAD_CONTROLLER_IMAGE` / `ZAD_TXLOG_IMAGE` | ghcr `…/{manager,controller,txlog}-migrate:<tag>` | Volledige image-override per wrapper — zet dit als het ghcr-pad afwijkt. manager/controller/txlog draaien een wrapper (`migrate up && serve`); de inway heeft geen DB en gebruikt het stock-image. |
 | `ZAD_DIRECTORY_MANAGER_HOST` | `dirmgr-test-mft-tp9.<base-domain>` | Repo A's directory-manager-host op ZAD — pas aan als de directory op een andere deployment/project draait. |
 | `ZAD_PG_SSLMODE` | `disable` | SSL-mode voor de `mgzpg`-DSN (intra-cluster plaintext, zoals berichtenbox-JDBC). |
 | `ZAD_PG_PASSWORD` | — (verplicht bij `apply`) | Wachtwoord voor de self-hosted Postgres (`mgzpg`). **Niet** committen; `export` (niet inline). Komt zowel in `POSTGRES_PASSWORD` als in de component-DSN's. |
