@@ -20,6 +20,8 @@
 >
 > De rest van dit document is bewaard als **historisch verslag** van de blokkade en het bewijs.
 
+---
+
 > **Samenvatting voor het RIG/ZAD-platformteam:** een ZAD-component kan precies één inbound-poort
 > publiceren, waardoor er per pod maar één cluster-interne Service ontstaat. FSC-componenten
 > (`manager`, `controller`) luisteren op meerdere mTLS-poorten met verschillende cert-ketens die

@@ -119,7 +119,7 @@ bleek: `DROP SCHEMA controller CASCADE` + de mgzctl-component herstarten (schaal
 1 replica). Los draaien kan ook, tegen `test-mgzpg` met de component-DSN (controller **zonder**,
 manager/txlog **mét** hun `search_path`):
 
-```
+```sh
 /usr/local/bin/controller migrate up --postgres-dsn "postgres://<user>:<pass>@test-mgzpg:5432/fsc?sslmode=disable"
 /usr/local/bin/txlog-api  migrate up --postgres-dsn "postgres://<user>:<pass>@test-mgzpg:5432/fsc?sslmode=disable&search_path=txlog"
 ```

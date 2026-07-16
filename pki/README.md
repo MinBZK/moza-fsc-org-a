@@ -72,6 +72,8 @@ cd pki
 > De SAN's in de nieuwe csr's (git-diff) en de adressen die `upsert-peer.sh` deployt sporen dan per
 > definitie, want beide lezen dezelfde `ZAD_*`-vars.
 
+---
+
 > **Lokale proof vs. echte directory — de group-CA verschilt.**
 >
 > - **Lokale compose-proof** (`deploy/local/`): geïsoleerde mesh, dus `init-ca.sh` genereert
