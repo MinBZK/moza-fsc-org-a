@@ -6,10 +6,13 @@
 # CLOBBER-VEILIG via PROJECT-ISOLATIE: de peer draait in een EIGEN ZAD-project `mpfoa-e2w`, los van
 # het app-project `mpfm-w3h` dat deploy.yml beheert. Er is dus geen app-deployment om te
 # overschrijven. Binnen mpfoa-e2w draait de peer in de deployment `test` -> één aanmelding van
-# de federatie-OIN (singleton), geen dubbele-OIN-botsing, ook al deployt dit op elke PR-push.
+# de federatie-OIN (singleton), geen dubbele-OIN-botsing. De echte `apply` draait bovendien alleen
+# op main; PR's plannen slechts (zie de trigger-noot onder).
 #
-# Trigger: elke push naar main én elke PR-synchronisatie -> deployment `test`. (Wil je smaller:
-# voeg een `paths:`-filter toe op pki/** + deploy/** + deze workflow.)
+# Trigger: elke push naar main => `apply` (deployment `test`). Elke PR-synchronisatie => alleen
+# `plan` (jq-only, geen netwerk, GEEN secrets) -> een PR die dit deploy-script wijzigt kan de
+# ZAD-sleutels niet exfiltreren, want `apply` (met secrets) draait uitsluitend op de vertrouwde
+# main-branch. (Wil je smaller: voeg een `paths:`-filter toe op pki/** + deploy/** + deze workflow.)
 #
 # Dekt alleen de deploy-API (deployment + componenten + images + env_vars/aliases). NIET via de
 # API (UI-only): bijlagen (cert-mount), "Publicatie op het web" (passthrough-TLS) — zie
@@ -49,7 +52,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Upsert magazijn-a-peer via ZAD v2-API
+      # PR: alleen `plan` (jq-only, geen netwerk). GEEN ZAD-secrets in de env, zodat een
+      # PR-geauthorde wijziging aan upsert-peer.sh de sleutels niet kan uitlezen/exfiltreren.
+      - name: Plan magazijn-a-peer (PR, geen secrets)
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          ZAD_PROJECT: ${{ env.PROJECT }}
+          ZAD_BASE_DOMAIN: ${{ env.BASE_DOMAIN }}
+          ZAD_MAGAZIJNA_PROJECT: ${{ env.MAGAZIJNA_PROJECT }}
+          IMAGE_TAG: v1.43.7
+        run: ./deploy/zad/upsert-peer.sh plan "${DEPLOYMENT}" "${IMAGE_TAG}"
+
+      # main: `apply`. Alleen hier zijn de secrets beschikbaar — de branch is vertrouwd (gemerged).
+      - name: Apply magazijn-a-peer via ZAD v2-API (main)
+        if: ${{ github.event_name == 'push' }}
         env:
           # Eigen project mpfoa-e2w => eigen API-key (NIET de magazijnen-key).
           ZAD_API_KEY: ${{ secrets.ZAD_API_KEY_FSCORGA }}

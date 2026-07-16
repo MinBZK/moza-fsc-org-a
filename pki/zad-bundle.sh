@@ -3,8 +3,8 @@
 # Verzamelt de upload-klare cert-set van één peer in pki/zad-upload/<peer>/ met een MANIFEST:
 # per bestand het beoogde pod-pad (/etc/fsc/...) + de TLS_*-env-var(s). Voor het uploaden naar
 # ZAD: de losse certs als attachments. "Publicatie op het web" modus 2 (passthrough) heeft GEEN
-# combined.pem nodig — de pod serveert de losse TLS_GROUP_CERT/KEY (zie docs/spikes/zad-attachments.md,
-# vraag 5). combine-pem.sh blijft een losse optie. Output is gitignored (bevat privésleutels).
+# combined.pem nodig — de pod serveert de losse TLS_GROUP_CERT/KEY (zie deploy/zad/cert-manifest.md).
+# combine-pem.sh blijft een losse optie. Output is gitignored (bevat privésleutels).
 # Draai eerst pki/issue.sh.
 set -euo pipefail
 
@@ -40,7 +40,7 @@ rm -rf "${OUT}"; mkdir -p "${OUT}"
   echo "doet wél hostnaam-verificatie, dus de group-cert heeft de ZAD-hostnaam in de SAN (wildcard)."
   echo
   echo "**Attachments** (losse files, elk op hun pod-pad). Modus 2 (passthrough) serveert deze los —"
-  echo "geen \`combined.pem\` nodig (zie \`docs/spikes/zad-attachments.md\`, vraag 5):"
+  echo "geen \`combined.pem\` nodig (zie \`deploy/zad/cert-manifest.md\`):"
   echo
   echo "| Bestand | Beoogd pod-pad / gebruik | TLS_*-env-var(s) |"
   echo "|---------|---------------------------|-------------------|"

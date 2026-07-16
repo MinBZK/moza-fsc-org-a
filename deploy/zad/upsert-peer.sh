@@ -35,8 +35,8 @@
 #
 # De deployment is VAST (test/mpfoa-e2w), dus we hebben ZAD's $DEPLOYMENT_NAME-substitutie niet
 # nodig: bash lost alle inter-component-hostnamen concreet op (MGZ*_HOST_DISPLAY) en zet ze in
-# `env_vars`. Zo leunen de adressen niet op aliases-substitutie. Alleen de DSN ($DATABASE_*) blijft
-# in `aliases`.
+# `env_vars`. Zo leunen de adressen niet op aliases-substitutie. Sinds de self-hosted mgzpg-Postgres
+# is óók de DB-DSN concreet (STORAGE_POSTGRES_DSN in env_vars), dus de aliases zijn nu leeg.
 #
 # Usage:
 #   export ZAD_API_KEY=...                          # niet inline (echo't anders)
@@ -373,6 +373,6 @@ fi
 echo "Klaar. Nog handmatig (UI):"
 echo "  - mgzpg: init-script als bijlage op /docker-entrypoint-initdb.d/10-schemas.sql (zie postgres-init.sql)."
 echo "  - FSC-componenten: cert-bijlagen op /etc/fsc/... + Publicatie op het web modus 2 op mgzmgr/mgzinway."
-echo "  - controller/txlog migraties draaien (geen wrapper): 'migrate up --postgres-dsn <mgzpg-DSN met search_path>'."
+echo "  - DB-migraties: manager/controller/txlog migreren automatisch bij boot via hun migrate-wrapper-image (geen handmatige stap)."
 echo "Extern (mesh, :443): mgzmgr=${MGZMGR_HOST_DISPLAY} mgzinway=${MGZINWAY_HOST_DISPLAY}"
 echo "Intern (cluster-Service-DNS): ${MGZMGR_SVC}:9443/:9444  ${MGZCTL_SVC}:9443/:9444  ${MGZTXLOG_SVC}:8443  db=${MGZPG_SVC}:5432"
