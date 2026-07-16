@@ -6,9 +6,9 @@
   },
   "hosts": [
     "txlog.magazijn-a.fsc-test.local",
-    "mgztxlog-test-mpfoa-e01.rig.prd1.gn2.quattro.rijksapps.nl",
+    "mgztxlog-test-mpfoa-e2w.rig.prd1.gn2.quattro.rijksapps.nl",
     "test-mgztxlog",
-    "test-mgztxlog.rig-prd-mpfoa-e01.svc.cluster.local"
+    "test-mgztxlog.rig-prd-mpfoa-e2w.svc.cluster.local"
   ],
   "serialnumber": "00000001003214345000",
   "names": [

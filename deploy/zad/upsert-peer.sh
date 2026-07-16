@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Zet de provider-peer magazijn-a (manager+controller+inway) op ZAD via de v2 Operations Manager
-# API in een EIGEN ZAD-project `mpfoa-e01`. De `magazijna`-app draait apart in `mpfm-w3h`; de inway
+# API in een EIGEN ZAD-project `mpfoa-e2w`. De `magazijna`-app draait apart in `mpfm-w3h`; de inway
 # bereikt die cross-project via de ingress-URL (ZAD_MAGAZIJNA_PROJECT/-UPSTREAM_URL). Gebaseerd op
 # repo A's deploy/zad/upsert-directory.sh (MinBZK/moza-fsc-testnet) — zelfde validate/plan/apply-
 # vorm, één bron voor CLI + de workflow zad-deploy-peer.yml.
 #
-# Eigen project = eigen ZAD-API-key: ZAD_API_KEY hoort bij `mpfoa-e01`, NIET de magazijnen-key.
+# Eigen project = eigen ZAD-API-key: ZAD_API_KEY hoort bij `mpfoa-e2w`, NIET de magazijnen-key.
 #
 # Model: de peer draait in de deployment `test` van het eigen project. Doordat het een eigen project
 # is, is er geen app-deployment om te overschrijven (project-isolatie i.p.v. deployment-isolatie).
@@ -24,15 +24,16 @@
 # DB: sinds 2026-07-15 draaien we een EIGEN postgres-component `mgzpg` (self-hosted) i.p.v. ZAD's
 # managed Postgres — die laat ons de init/schema's niet inrichten. mgzmgr/mgzctl/mgztxlog krijgen een
 # CONCRETE STORAGE_POSTGRES_DSN naar `mgzpg:5432` (in env_vars, geen ZAD $DATABASE_*-substitutie meer,
-# dus aliases zijn leeg), elk met een eigen `search_path`-schema. Het wachtwoord komt uit ZAD_PG_PASSWORD
-# (verplicht bij apply, niet gecommit). Zie postgres-init.sql voor de 3 schema's.
+# dus aliases zijn leeg); manager/txlog met een eigen `search_path`-schema, de controller ZONDER (die
+# beheert z'n eigen `controller`-schema). Het wachtwoord komt uit ZAD_PG_PASSWORD
+# (verplicht bij apply, niet gecommit). Zie postgres-init.sql voor de search_path-schema's (manager/txlog).
 #
 # BELANGRIJK — ZAD past component-config (env_vars/aliases) alleen bij COMPONENT-CREATIE toe, niet
 # bij een re-POST op een bestaande component (bewezen: een tx-log-adres dat pas in een tweede deploy
 # aan de aliases werd toegevoegd bereikte de al-bestaande manager niet). Wijzig je de config van een
 # bestaande component, verwijder 'm dan eerst in de UI zodat de volgende apply 'm opnieuw aanmaakt.
 #
-# De deployment is VAST (test/mpfoa-e01), dus we hebben ZAD's $DEPLOYMENT_NAME-substitutie niet
+# De deployment is VAST (test/mpfoa-e2w), dus we hebben ZAD's $DEPLOYMENT_NAME-substitutie niet
 # nodig: bash lost alle inter-component-hostnamen concreet op (MGZ*_HOST_DISPLAY) en zet ze in
 # `env_vars`. Zo leunen de adressen niet op aliases-substitutie. Alleen de DSN ($DATABASE_*) blijft
 # in `aliases`.
@@ -42,7 +43,7 @@
 #   ./deploy/zad/upsert-peer.sh validate                       # read-only auth-check
 #   ./deploy/zad/upsert-peer.sh plan   [deployment] [tag]       # toont bodies, muteert niet
 #   ./deploy/zad/upsert-peer.sh apply  [deployment] [tag]       # muteert + pollt tasks
-# Env: ZAD_API_KEY (verplicht bij apply; key van project mpfoa-e01), ZAD_PROJECT (mpfoa-e01),
+# Env: ZAD_API_KEY (verplicht bij apply; key van project mpfoa-e2w), ZAD_PROJECT (mpfoa-e2w),
 #      ZAD_BASE (zad.rijksapp.nl), ZAD_BASE_DOMAIN (rig.prd1...), ZAD_MANAGER_TAG (ghcr manager-tag,
 #      default = tag), ZAD_DIRECTORY_MANAGER_HOST (repo A's directory-manager-host op ZAD),
 #      ZAD_PG_SSLMODE (disable), ZAD_MAGAZIJNA_PROJECT (mpfm-w3h, waar de app draait),
@@ -53,7 +54,7 @@ MODE="${1:?usage: upsert-peer.sh <validate|plan|apply> [deployment=test] [tag=v1
 DEPLOYMENT="${2:-${ZAD_DEPLOYMENT:-test}}"       # arg wint; anders ZAD_DEPLOYMENT (spoort met pki/gen-csr.sh)
 IMAGE_TAG="${3:-v1.43.7}"                        # OpenFSC stock-tag (controller/inway; default voor de manager-wrapper)
 MANAGER_TAG="${ZAD_MANAGER_TAG:-${IMAGE_TAG}}"   # manager-migrate (ghcr) kan een eigen tag hebben
-PROJECT="${ZAD_PROJECT:-mpfoa-e01}"
+PROJECT="${ZAD_PROJECT:-mpfoa-e2w}"
 BASE="${ZAD_BASE:-https://zad.rijksapp.nl}"
 BASE_DOMAIN="${ZAD_BASE_DOMAIN:-rig.prd1.gn2.quattro.rijksapps.nl}"
 PG_SSLMODE="${ZAD_PG_SSLMODE:-disable}"          # managed DB intra-cluster: plaintext (zoals berichtenbox-JDBC)
@@ -62,17 +63,21 @@ CLONE_FROM="${ZAD_PEER_CLONE_FROM:-}"            # leeg = geen clone; `test` bes
 # --- Self-hosted Postgres (component mgzpg) ---------------------------------------------------------
 # ZAD's managed Postgres laat ons het schema/init niet inrichten (geen init-scripts, geen CREATE
 # SCHEMA-rechten op eigen voorwaarden). Daarom draaien we een EIGEN postgres-component `mgzpg` die we
-# volledig beheren: één database met drie geïsoleerde schema's (manager/controller/txlog), aangemaakt
-# door deploy/zad/postgres-init.sql (UI-attachment op /docker-entrypoint-initdb.d). manager/controller/
-# txlog verbinden hier met een eigen search_path, zodat hun golang-migrate `schema_migrations`-tellers
-# niet botsen (anders skipt de controller-migratie -> 42P01 op controller.services).
+# volledig beheren: één database met geïsoleerde golang-migrate `schema_migrations`-tellers per
+# component. manager + txlog isoleren hun teller via een eigen `search_path`-schema (aangemaakt door
+# deploy/zad/postgres-init.sql, UI-attachment op /docker-entrypoint-initdb.d). De controller draait
+# ZONDER search_path (uitzondering, zie CTL_SCHEMA) en beheert z'n eigen `controller`-schema; z'n teller
+# landt in public. Zo botsen de tellers niet (anders skipt een migratie -> 42P01 op controller.services).
 PG_USER="${ZAD_PG_USER:-fsc}"
 PG_DB="${ZAD_PG_DB:-fsc}"
 PG_PASSWORD="${ZAD_PG_PASSWORD:-__SET_ZAD_PG_PASSWORD__}"   # concreet bij apply (verplicht, zie check onder); nooit committen
 # search_path per component. `-` i.p.v. `:-` zodat ZAD_*_SCHEMA="" écht leeg blijft (dan geen search_path
-# in de DSN -> component gebruikt public). De namen moeten sporen met postgres-init.sql.
+# in de DSN -> component gebruikt public). manager + txlog moeten sporen met postgres-init.sql (dat die
+# twee schema's aanmaakt). De CONTROLLER is de UITZONDERING: die maakt z'n eigen `controller`-schema aan
+# (schema-gekwalificeerde DDL) en loopt mét search_path vast op een dirty migratie #1 -> default LEEG
+# (geen search_path; z'n schema_migrations landt in public, los van manager/txlog).
 MGR_SCHEMA="${ZAD_MGR_SCHEMA-manager}"
-CTL_SCHEMA="${ZAD_CTL_SCHEMA-controller}"
+CTL_SCHEMA="${ZAD_CTL_SCHEMA-}"
 TXLOG_SCHEMA="${ZAD_TXLOG_SCHEMA-txlog}"
 
 case "${MODE}" in validate|plan|apply) ;; *) echo "mode = validate | plan | apply"; exit 1 ;; esac
@@ -90,7 +95,7 @@ POSTGRES_IMAGE="${ZAD_POSTGRES_IMAGE:-docker.io/library/postgres:17}"   # self-h
 
 # Concrete hostnamen voor déze (vaste) deployment — zowel voor de plan-/apply-output als, direct,
 # voor de inter-component-adressen in de env_vars-blobs. Geen $DEPLOYMENT_NAME-substitutie: de
-# deployment is vast (test/mpfoa-e01), dus bash lost de hostnaam op en we leunen niet op ZAD's
+# deployment is vast (test/mpfoa-e2w), dus bash lost de hostnaam op en we leunen niet op ZAD's
 # aliases-substitutie (die alleen bij component-creatie wordt toegepast, niet bij een re-POST).
 MGZMGR_HOST_DISPLAY="mgzmgr-${DEPLOYMENT}-${PROJECT}.${BASE_DOMAIN}"
 MGZCTL_HOST_DISPLAY="mgzctl-${DEPLOYMENT}-${PROJECT}.${BASE_DOMAIN}"
@@ -116,7 +121,7 @@ MGZPG_SVC="${DEPLOYMENT}-mgzpg"                  # self-hosted Postgres, intern 
 # directory-host is; override met ZAD_DIRECTORY_MANAGER_HOST als de directory elders draait.
 DIRECTORY_MANAGER_HOST="${ZAD_DIRECTORY_MANAGER_HOST:-dirmgr-test-mft-tp9.${BASE_DOMAIN}}"
 
-# De peer draait in een EIGEN project (`mpfoa-e01`); de magazijna-app draait in `mpfm-w3h`. De inway
+# De peer draait in een EIGEN project (`mpfoa-e2w`); de magazijna-app draait in `mpfm-w3h`. De inway
 # bereikt de app dus CROSS-PROJECT via de ZAD-ingress-URL (https, :443 — de ingress mapt naar de
 # app-containerpoort; geen poort in de URL). De upstream-URL is daarom afgeleid van het APP-project
 # (ZAD_MAGAZIJNA_PROJECT, NIET het peer-PROJECT) + de app-deployment. Default-app-deployment =
@@ -217,7 +222,7 @@ MGZTXLOG_ALIASES=""
 # --- self-hosted Postgres: component-env + concrete DSN per FSC-component -----------------------------
 # mgzpg draait het officiële postgres-image (config puur via POSTGRES_*-env, geen command nodig). PGDATA
 # in een subdir zodat een eventueel gemount volume met lost+found de init niet blokkeert. Het init-script
-# (3 schema's) is een UI-attachment op /docker-entrypoint-initdb.d (zie postgres-init.sql + cert-manifest).
+# (schema's manager + txlog) is een UI-attachment op /docker-entrypoint-initdb.d (zie postgres-init.sql + cert-manifest).
 MGZPG_ENV="$(printf '%s\n' \
   "POSTGRES_USER=${PG_USER}" \
   "POSTGRES_PASSWORD=${PG_PASSWORD}" \

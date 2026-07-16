@@ -7,9 +7,9 @@
   "hosts": [
     "magazijn-a.fsc-test.local",
     "manager.magazijn-a.fsc-test.local",
-    "mgzmgr-test-mpfoa-e01.rig.prd1.gn2.quattro.rijksapps.nl",
+    "mgzmgr-test-mpfoa-e2w.rig.prd1.gn2.quattro.rijksapps.nl",
     "test-mgzmgr",
-    "test-mgzmgr.rig-prd-mpfoa-e01.svc.cluster.local"
+    "test-mgzmgr.rig-prd-mpfoa-e2w.svc.cluster.local"
   ],
   "serialnumber": "00000001003214345000",
   "names": [

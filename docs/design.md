@@ -62,7 +62,7 @@ uitbreiding), txlog-hardening/e2e-verantwoording (#728), en het echte data-pad d
 | Peer-naam | `magazijn-a` | conventie repo B (geen `example-*`) |
 | Group ID | `moza-fbs-test` | repo A directory-deploy |
 | Directory-OIN | `00000000000000000010` | repo A directory-deploy |
-| ZAD-project peer | `mpfoa-e01` (eigen project) | dit ontwerp (was co-located `mpfm-w3h`) |
+| ZAD-project peer | `mpfoa-e2w` (eigen project) | dit ontwerp (was co-located `mpfm-w3h`) |
 | ZAD-project app | `magazijnen` / `mpfm-w3h` | repo B `deploy.yml` |
 | App-component (inway-upstream) | `magazijna` (cross-project via ingress-URL) | repo B `deploy.yml` |
 | Dienst-naam in de directory | `berichtenmagazijn` | dit ontwerp |
@@ -72,7 +72,7 @@ uitbreiding), txlog-hardening/e2e-verantwoording (#728), en het echte data-pad d
 ## Architectuur
 
 Gespiegeld op repo A's `example-provider`. Per peer een eigen set FSC-componenten; de
-magazijn-peer draait **in een eigen ZAD-project `mpfoa-e01`** (project-isolatie). De
+magazijn-peer draait **in een eigen ZAD-project `mpfoa-e2w`** (project-isolatie). De
 `magazijna`-app draait apart in `mpfm-w3h`; de inway bereikt die **cross-project via de
 ingress-URL** (https, :443), niet via intra-project-DNS.
 
@@ -83,7 +83,7 @@ ingress-URL** (https, :443), niet via intra-project-DNS.
 | manager | `mgzmgr` | announce bij de directory + ServicePublicationGrant; `manager-migrate`-wrapper migreert de peer-DB bij boot |
 | controller | `mgzctl` | dienst `berichtenmagazijn` aanmaken (Administration-API, `AUTHN_TYPE=none`) + beheer-UI + inway-registratie (Registration-API) |
 | inway | `mgzinway` | ingress vóór de `magazijna`-app-component (intra-project DNS); registreert bij de controller |
-| DB | `mgzpg` (self-hosted Postgres, één DB, 3 schema's) | system-of-record manager + controller + txlog |
+| DB | `mgzpg` (self-hosted Postgres, één DB, geïsoleerde migratie-tellers) | system-of-record manager + controller + txlog |
 
 `txlog` draait lokaal mee (mirror van example-provider) maar wordt **niet** gehard voor #780;
 volledige tx-logging is #728. Op ZAD blijft `TX_LOG_API_ADDRESS` in eerste ronde leeg/minimaal.
@@ -120,13 +120,13 @@ magazijn-a                                   centrale kern (directory)
 1. **Lokale compose-proof** (mirror example-provider, echte OIN + dienst `berichtenmagazijn`):
    `smoke-announce.sh` + een discover-check groen. Bewijst AC-3 en AC-4 lokaal.
 2. **ZAD** — nieuw `upsert-peer.sh` (er is nog géén peer-ZAD-deploy in repo A) + cert-attachments,
-   componenten in `mpfoa-e01`, inway → `magazijna` (cross-project). Bewijst alle vier AC's op de echte directory.
+   componenten in `mpfoa-e2w`, inway → `magazijna` (cross-project). Bewijst alle vier AC's op de echte directory.
 
 ## Acceptatiecriteria (uit #780) → dekking
 
 | AC | Gedekt door |
 |----|-------------|
-| Magazijn-peer (echte OIN) draait naast de app: manager + inway + controller + DB (ZAD, project-isolatie) | Fase 2 (ZAD-upsert in `mpfoa-e01`) |
+| Magazijn-peer (echte OIN) draait naast de app: manager + inway + controller + DB (ZAD, project-isolatie) | Fase 2 (ZAD-upsert in `mpfoa-e2w`) |
 | Peer verkrijgt group-cert via het cert-portal van repo A | Cert-portal lokaal aangetoond + bewezen `issue.sh`+attachment-pad (zie bevinding) |
 | Peer meldt zich aan bij de directory (announce) | `smoke-announce.sh` (lokaal + ZAD) |
 | `berichtenmagazijn` gepubliceerd + vindbaar in de directory | `publish-service.sh` + discover-check (lokaal + ZAD) |
@@ -134,18 +134,18 @@ magazijn-a                                   centrale kern (directory)
 ## Open punten (genoteerd, niet-blokkerend)
 
 - **Peer-topologie op ZAD (clobber-veilig via project-isolatie):** de peer draait in een **eigen
-  ZAD-project `mpfoa-e01`**, los van het app-project `mpfm-w3h` dat `deploy.yml` beheert. Er is dus
-  geen app-deployment om te overschrijven. Binnen `mpfoa-e01` draait de peer in de deployment
+  ZAD-project `mpfoa-e2w`**, los van het app-project `mpfm-w3h` dat `deploy.yml` beheert. Er is dus
+  geen app-deployment om te overschrijven. Binnen `mpfoa-e2w` draait de peer in de deployment
   `test` = één aanmelding van de federatie-OIN (singleton). De inway bereikt `magazijna`
   **cross-project via de ingress-URL** (`https://magazijna-<app-deployment>-mpfm-w3h.<base-domain>`,
   https/:443). Eigen project betekent ook een **eigen ZAD-API-key** (`ZAD_API_KEY_FSCORGA`). De
   raw v2-API maakt geen nieuwe deployments; `test` is doorgaans het project-default en bestaat al
   (anders eenmalig leeg in de UI aanmaken). De `zad-deploy-peer.yml`-workflow deployt op elke
-  PR-push naar `mpfoa-e01`/`test`.
+  PR-push naar `mpfoa-e2w`/`test`.
 - **Interne-mTLS SAN — OPGELOST (least-privilege).** Elk internal-cert draagt nu zijn **eigen
-  concrete** hostnamen: de publieke ZAD-hostnaam (`mgzmgr-test-mpfoa-e01.<base-domain>` op de
+  concrete** hostnamen: de publieke ZAD-hostnaam (`mgzmgr-test-mpfoa-e2w.<base-domain>` op de
   manager, `mgzctl-…`, `mgzinway-…`, `mgztxlog-…`) **plus** — sinds de multi-poort-fix — de
-  cluster-interne Service-DNS (`test-mgzmgr` + `test-mgzmgr.rig-prd-mpfoa-e01.svc.cluster.local`),
+  cluster-interne Service-DNS (`test-mgzmgr` + `test-mgzmgr.rig-prd-mpfoa-e2w.svc.cluster.local`),
   waarnaar het interne mTLS-verkeer sinds 2026-07-13 verbindt. Géén domein-brede wildcard (alle
   SAN's zijn concrete namen), zodat de certs niet voor het hele gedeelde Rijks-hosting-domein geldig
   zijn. Bewezen met `verify.sh` + `openssl`. Verandert het project of de deployment-naam, dan moeten
@@ -159,12 +159,15 @@ magazijn-a                                   centrale kern (directory)
   init/schema's niet inrichten, en toen manager/controller/txlog één gedeelde DB kregen, botsten hun
   golang-migrate `schema_migrations`-tellers: de controller-migratie zag de manager-versie, sloeg over,
   en `controller.services` ontbrak (`42P01`). Oplossing: een eigen postgres-component `mgzpg` die we
-  volledig beheren — één database met **drie geïsoleerde schema's** (`manager`/`controller`/`txlog`),
-  aangemaakt door `deploy/zad/postgres-init.sql` (UI-attachment op `/docker-entrypoint-initdb.d`). Elke
-  FSC-component verbindt met een eigen `search_path` (concrete DSN in `env_vars`, geen ZAD
-  `$DATABASE_*` meer). Wachtwoord via `ZAD_PG_PASSWORD` (niet gecommit). De manager migreert bij boot
-  (wrapper); controller/txlog draaien hun `migrate up` los (zelfde `search_path`) — een
-  `controller-migrate`/`txlog-migrate`-wrapper (à la manager) is de nette vervolgstap. Aandachtspunt:
+  volledig beheren — één database met **geïsoleerde migratie-tellers per component**, waarbij de
+  componenten zich niet gelijk gedragen (2026-07-16): **manager en txlog** isoleren hun teller via een
+  eigen `search_path`-schema (`manager`/`txlog`, aangemaakt door `deploy/zad/postgres-init.sql`,
+  UI-attachment op `/docker-entrypoint-initdb.d`). De **controller is de uitzondering**: mét een vooraf
+  aangemaakt `controller`-schema + `search_path=controller` liep migratie #1 dirty vast — die draait
+  daarom **zonder** search_path (`ZAD_CTL_SCHEMA=""`), maakt z'n eigen `controller`-schema aan
+  (schema-gekwalificeerde DDL) en houdt z'n teller in `public` (los van manager/txlog). Concrete DSN in
+  `env_vars` (geen ZAD `$DATABASE_*` meer); wachtwoord via `ZAD_PG_PASSWORD` (niet gecommit). Manager en
+  controller migreren bij boot via een wrapper (`manager-migrate` / `controller-migrate`). Aandachtspunt:
   zonder persistent volume is `mgzpg` ephemeral (prima voor test; PVC voor een blijvende peer).
 - **`POST /components` werkt de env van een BESTAANDE component niet bij — env is UI-beheerd.**
   Bewezen: een `TX_LOG_API_ADDRESS` die na de eerste creatie werd gezet (via re-POST én via een
@@ -173,7 +176,7 @@ magazijn-a                                   centrale kern (directory)
   in zat. Dit spiegelt het app-model (zad-actions): de deploy-API beheert images/refs, runtime-env
   komt uit `clone-from`/de UI. Gevolg voor deze peer: de component-env wordt **in de UI** gezet/
   bijgewerkt (concrete waarden, geen `$DEPLOYMENT_NAME`-substitutie nodig want de deployment is vast
-  `test`/`mpfoa-e01`); de Postgres-DSN is sinds de self-hosted `mgzpg` óók concreet (geen `$DATABASE_*`
+  `test`/`mpfoa-e2w`); de Postgres-DSN is sinds de self-hosted `mgzpg` óók concreet (geen `$DATABASE_*`
   meer). De workflow
   blijft betrouwbaar voor images/refs. Componenten NIET verwijderen om env te wijzigen — dan raak je
   de cert-attachments (UI-only per component) kwijt.

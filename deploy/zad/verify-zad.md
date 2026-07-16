@@ -5,7 +5,7 @@
 
 ## Volgorde
 
-1. `upsert-peer.sh apply` gedraaid → deployment + componenten bestaan in project `mpfoa-e01`,
+1. `upsert-peer.sh apply` gedraaid → deployment + componenten bestaan in project `mpfoa-e2w`,
    elk met zijn `ports`-array (mgzmgr `8443,9443,9444`; mgzctl `8080,9443,9444`; mgzinway/mgztxlog
    `8443`) zodat de interne mTLS-poorten een cluster-Service (`test-<comp>:<poort>`) krijgen.
 2. Cert-attachments gemount (zie `cert-manifest.md`) + "Publicatie op het web"
@@ -26,7 +26,7 @@ curl -sS --cert <group-cert> --key <group-key> --cacert <group-root> \
 ```
 
 Verwacht: één entry met `id: "00000001003214345000"` en een `manager_address` die eindigt op
-`:443` en het mgzmgr-hostpatroon (`mgzmgr-<deployment>-mpfoa-e01.<base-domain>`) bevat.
+`:443` en het mgzmgr-hostpatroon (`mgzmgr-<deployment>-mpfoa-e2w.<base-domain>`) bevat.
 
 Alternatief (UI): log in op de directory-UI (repo A's `dirui`-component) en zoek de peer op OIN.
 
@@ -37,7 +37,7 @@ maakt de dienst + het servicePublication-contract aan en laat de manager het ond
 interne-PKI op `test-mgzmgr:9443` — geen mesh-omweg meer nodig.
 
 - **UI (aanbevolen — werkt nu end-to-end)**: via de extern gepubliceerde mgzctl-beheer-UI
-  (`LISTEN_ADDRESS_UI`, extern op `https://mgzctl-<deployment>-mpfoa-e01.<base-domain>:443`,
+  (`LISTEN_ADDRESS_UI`, extern op `https://mgzctl-<deployment>-mpfoa-e2w.<base-domain>:443`,
   `AUTHN_TYPE=none`) een dienst aanmaken met naam `berichtenmagazijn`, `endpoint_url` = de waarde
   uit `upsert-peer.sh`'s `MAGAZIJNA_UPSTREAM_URL` (de ingress-URL van de app cross-deployment, bv.
   `https://magazijna-test-mpfm-w3h.<base-domain>`) en `inway_address` = de geregistreerde mgzinway
@@ -46,7 +46,7 @@ interne-PKI op `test-mgzmgr:9443` — geen mesh-omweg meer nodig.
 - **Script (alleen vanuit de cluster)**: `deploy/local/publish-service.sh` POST naar de mgzctl
   Administration-API (`:9444`) en de manager-internal (`:9443`) — beide zijn nu cluster-interne
   Services (`test-mgzctl:9444`, `test-mgzmgr:9443`) met de **internal-PKI**, dus dit kan alleen
-  vanuit een pod/job binnen namespace `rig-prd-mpfoa-e01` draaien (niet vanaf een externe host; die
+  vanuit een pod/job binnen namespace `rig-prd-mpfoa-e2w` draaien (niet vanaf een externe host; die
   poorten hebben geen ingress). Buiten de cluster is de UI-route de enige.
 
 Verwacht: de contract-respons bevat `content_hash` (manager signt) en de directory (

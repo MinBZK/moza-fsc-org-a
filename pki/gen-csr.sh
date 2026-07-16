@@ -21,7 +21,7 @@ set -euo pipefail
 BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
 # --- ZAD-topologie (DEZELFDE env-vars + defaults als deploy/zad/upsert-peer.sh) ---------------------
-PROJECT="${ZAD_PROJECT:-mpfoa-e01}"
+PROJECT="${ZAD_PROJECT:-mpfoa-e2w}"
 DEPLOYMENT="${ZAD_DEPLOYMENT:-test}"                       # upsert-peer.sh neemt dit als arg (default test)
 BASE_DOMAIN="${ZAD_BASE_DOMAIN:-rig.prd1.gn2.quattro.rijksapps.nl}"
 NAMESPACE="${ZAD_NAMESPACE:-rig-prd-${PROJECT}}"          # OpenShift-namespace = rig-prd-<project>

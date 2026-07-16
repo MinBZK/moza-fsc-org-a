@@ -3,9 +3,9 @@
 # zad-deploy-directory.yml (MinBZK/moza-fsc-testnet), maar zonder build-job: de drie images
 # (manager-migrate, controller, inway) zijn kant-en-klare pins — deze repo bouwt ze niet zelf.
 #
-# CLOBBER-VEILIG via PROJECT-ISOLATIE: de peer draait in een EIGEN ZAD-project `mpfoa-e01`, los van
+# CLOBBER-VEILIG via PROJECT-ISOLATIE: de peer draait in een EIGEN ZAD-project `mpfoa-e2w`, los van
 # het app-project `mpfm-w3h` dat deploy.yml beheert. Er is dus geen app-deployment om te
-# overschrijven. Binnen mpfoa-e01 draait de peer in de deployment `test` -> één aanmelding van
+# overschrijven. Binnen mpfoa-e2w draait de peer in de deployment `test` -> één aanmelding van
 # de federatie-OIN (singleton), geen dubbele-OIN-botsing, ook al deployt dit op elke PR-push.
 #
 # Trigger: elke push naar main én elke PR-synchronisatie -> deployment `test`. (Wil je smaller:
@@ -39,7 +39,7 @@ jobs:
       pull-requests: write
     env:
       DEPLOYMENT: test
-      PROJECT: ${{ vars.ZAD_PROJECT_ID_MPFOA || 'mpfoa-e01' }}
+      PROJECT: ${{ vars.ZAD_PROJECT_ID_MPFOA || 'mpfoa-e2w' }}
       BASE_DOMAIN: ${{ vars.ZAD_BASE_DOMAIN || 'rig.prd1.gn2.quattro.rijksapps.nl' }}
       # De app draait in een ANDER project (mpfm-w3h); de inway-upstream wijst er cross-project heen.
       MAGAZIJNA_PROJECT: ${{ vars.ZAD_PROJECT_ID_MAGAZIJNEN || 'mpfm-w3h' }}
@@ -51,7 +51,7 @@ jobs:
 
       - name: Upsert magazijn-a-peer via ZAD v2-API
         env:
-          # Eigen project mpfoa-e01 => eigen API-key (NIET de magazijnen-key).
+          # Eigen project mpfoa-e2w => eigen API-key (NIET de magazijnen-key).
           ZAD_API_KEY: ${{ secrets.ZAD_API_KEY_FSCORGA }}
           ZAD_PROJECT: ${{ env.PROJECT }}
           ZAD_MAGAZIJNA_PROJECT: ${{ env.MAGAZIJNA_PROJECT }}

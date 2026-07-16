@@ -20,7 +20,7 @@ services) maar **geen bijlagen** — net als repo A's directory-deploy
 1. `pki/issue.sh` (vereist `cfssl`) — genereert `pki/out/magazijn-a/*` (group,
    getekend door fsc-testnet's intermediate) en `pki/internal/magazijn-a/*` (internal).
    **Let op (multi-poort-fix, 2026-07-13):** de internal-cert-SAN's bevatten nu ook de
-   cluster-interne Service-DNS (`test-<comp>` + `test-<comp>.rig-prd-mpfoa-e01.svc.cluster.local`),
+   cluster-interne Service-DNS (`test-<comp>` + `test-<comp>.rig-prd-mpfoa-e2w.svc.cluster.local`),
    waarnaar het interne mTLS-verkeer verbindt. Draaide je `issue.sh` vóór deze wijziging, geef de
    certs dan opnieuw uit met `issue.sh -f` (anders faalt de hostnaamverificatie op `test-mgzmgr:9443`
    enz.) en upload de verse set opnieuw.
@@ -82,37 +82,47 @@ net als in de lokale compose.
 Sinds 2026-07-15 draait de peer een eigen postgres-component `mgzpg` (self-hosted) i.p.v. ZAD's
 managed Postgres, zodat we de schema-init zelf beheren (zie `docs/design.md` + `upsert-peer.sh`). Geen
 TLS-attachments (intra-cluster plaintext op `:5432`, `sslmode=disable`), maar wél één attachment: het
-init-script dat de 3 schema's aanmaakt.
+init-script dat de search_path-schema's `manager` + `txlog` aanmaakt (de controller maakt z'n eigen schema).
 
 | Bijlage-pad (in de mgzpg-container) | Bronbestand (repo) | Werking |
 |-------------------------------------|--------------------|---------|
-| `/docker-entrypoint-initdb.d/10-schemas.sql` | `deploy/zad/postgres-init.sql` | postgres draait dit éénmalig bij lege PGDATA → `CREATE SCHEMA manager/controller/txlog` |
+| `/docker-entrypoint-initdb.d/10-schemas.sql` | `deploy/zad/postgres-init.sql` | postgres draait dit éénmalig bij lege PGDATA → `CREATE SCHEMA manager, txlog` |
 
 Verder geen bijlagen op mgzpg. Het wachtwoord komt uit `ZAD_PG_PASSWORD` (env bij `apply`, niet in git);
 `POSTGRES_USER`/`POSTGRES_DB`/`PGDATA` staan als component-env.
 
 **Persistentie:** zonder gekoppeld persistent volume is de DB ephemeral — bij een nieuwe pod draait het
-init-script opnieuw en zijn de tabellen leeg (manager migreert vanzelf via de wrapper; controller/txlog
-moeten dan opnieuw migreren). Voor een blijvende peer: een persistent volume op `PGDATA` koppelen.
+init-script opnieuw en zijn de tabellen leeg (manager + controller migreren vanzelf via hun wrapper).
+Voor een blijvende peer: een persistent volume op `PGDATA` koppelen.
 
-**Schema-namen moeten sporen** met `ZAD_MGR_SCHEMA`/`ZAD_CTL_SCHEMA`/`ZAD_TXLOG_SCHEMA` in
-`upsert-peer.sh` (defaults manager/controller/txlog). Wijzig je de één, wijzig dan de ander mee.
+**Schema-namen moeten sporen** met `ZAD_MGR_SCHEMA`/`ZAD_TXLOG_SCHEMA` in `upsert-peer.sh` (defaults
+`manager`/`txlog`) — dat zijn de search_path-schema's die het init-script aanmaakt. `ZAD_CTL_SCHEMA` is
+**leeg** (de controller draait zonder search_path); zet je 'm tóch, dan loopt migratie #1 dirty vast.
 
-## Controller- en txlog-migraties draaien (geen wrapper)
+## Migraties per component
 
-De manager migreert bij boot via de `manager-migrate`-wrapper. De controller en txlog draaien op hun
-stock-image en hebben **geen** migratiestap — draai die eenmalig (bv. een ZAD-job of exec in de pod)
-tegen `mgzpg`, mét dezelfde `search_path` als serve, anders landen de tabellen in het verkeerde schema:
+- **manager** — migreert bij boot via de `manager-migrate`-wrapper (`migrate up && serve`); teller in
+  schema `manager` (search_path), echte tabellen in `peers`/`contracts`.
+- **controller** — migreert via de `controller-migrate`-wrapper, **zonder search_path**: de controller
+  maakt z'n eigen `controller`-schema aan (schema-gekwalificeerde DDL) en houdt z'n teller in `public`.
+  Mét een vooraf aangemaakt `controller`-schema + `search_path=controller` liep migratie #1 dirty vast.
 
-```
-/usr/local/bin/controller migrate up \
-  --postgres-dsn "postgres://<user>:<pass>@test-mgzpg:5432/fsc?sslmode=disable&search_path=controller"
-/usr/local/bin/txlog-api  migrate up \
-  --postgres-dsn "postgres://<user>:<pass>@test-mgzpg:5432/fsc?sslmode=disable&search_path=txlog"
-```
+  ```
+  /usr/local/bin/controller migrate up \
+    --postgres-dsn "postgres://<user>:<pass>@test-mgzpg:5432/fsc?sslmode=disable"
+  ```
 
-Omdat elk component nu zijn eigen schema (dus eigen `schema_migrations`) heeft, draaien deze migraties
-vers vanaf versie 0 en ontstaan de ontbrekende tabellen (o.a. `controller.services`).
+- **txlog** — teller in schema `txlog` (search_path=txlog), echte tabellen in `transactionlog`.
+
+  ```
+  /usr/local/bin/txlog-api migrate up \
+    --postgres-dsn "postgres://<user>:<pass>@test-mgzpg:5432/fsc?sslmode=disable&search_path=txlog"
+  ```
+
+**Vastgelopen op `Dirty database version N`?** De vorige migratie brak halverwege af (onderbroken, of
+door meerdere replica's die om de migratie-lock vochten). Schoon de migratie-state van dát component op
+en herstart 'm zodat de wrapper vers migreert — voor de controller bleek: `DROP SCHEMA controller
+CASCADE` + de mgzctl-component herstarten (schaal desnoods tijdelijk naar 1 replica).
 
 ## Na het mounten
 
@@ -128,7 +138,7 @@ bestaande component (zie `design.md`). Bestaan de componenten al met de oude (`:
 zijn er twee routes om de nieuwe interne adressen + poorten door te voeren:
 
 - **Poorten los bijwerken via de API** (env blijft ongemoeid): `PATCH
-  /api/v2/projects/mpfoa-e01/components/<comp>` met body `{"ports":[…]}` (mgzmgr `[8443,9443,9444]`,
+  /api/v2/projects/mpfoa-e2w/components/<comp>` met body `{"ports":[…]}` (mgzmgr `[8443,9443,9444]`,
   mgzctl `[8080,9443,9444]`). Zet daarnaast de interne adressen (`MANAGER_ADDRESS_INTERNAL` etc.)
   in de **UI**, want env is UI-beheerd op een bestaande component. Cert-attachments blijven behouden.
 - **Component verwijderen + opnieuw aanmaken** (via `upsert-peer.sh apply`, die env+ports in één

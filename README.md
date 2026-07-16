@@ -67,7 +67,7 @@ docker compose up -d
 
 Zie `deploy/zad/README.md`. Kort:
 
-- Eigen ZAD-project `mpfoa-e01`, deployment `test`, eigen API-key (secret `ZAD_API_KEY_FSCORGA`).
+- Eigen ZAD-project `mpfoa-e2w`, deployment `test`, eigen API-key (secret `ZAD_API_KEY_FSCORGA`).
 - `upsert-peer.sh` beheert deployment + componenten + images.
 - Cert-attachments + "Publicatie op het web" (passthrough) zijn **UI-only** — zie `cert-manifest.md`.
 

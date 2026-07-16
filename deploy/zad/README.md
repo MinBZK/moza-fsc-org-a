@@ -1,7 +1,7 @@
 # ZAD-deploy — provider-peer magazijn-a
 
 ZAD-rollout van de FSC-provider-peer `magazijn-a` (manager `mgzmgr`, controller `mgzctl`, inway
-`mgzinway`) in een **eigen ZAD-project `mpfoa-e01`**. De `magazijna`-app draait apart in
+`mgzinway`) in een **eigen ZAD-project `mpfoa-e2w`**. De `magazijna`-app draait apart in
 `mpfm-w3h`; de inway bereikt die cross-project via de ingress-URL. Bouwt voort op `pki/`
 (certs) en `deploy/local/` (lokale compose-proof van dezelfde peer); zie die README's voor het
 cert-contract resp. de lokale smokes.
@@ -27,7 +27,7 @@ cert-contract resp. de lokale smokes.
    (vereist `cfssl`; zie `pki/README.md`).
 2. **Bundle** — `pki/zad-bundle.sh magazijn-a` (hangt af van stap 1) →
    upload-klare cert-set in `pki/zad-upload/magazijn-a/`.
-3. **Deployment `test` moet bestaan** in project `mpfoa-e01` — de raw v2-API `:upsert-deployment`
+3. **Deployment `test` moet bestaan** in project `mpfoa-e2w` — de raw v2-API `:upsert-deployment`
    maakt géén NIEUWE deployment aan (geeft wel 202 maar het deployment verschijnt niet); het UPDATET
    alleen een bestaand deployment. `test` is doorgaans het default-deployment van een nieuw project
    en bestaat dus al. Zo niet: maak het éénmalig handmatig (leeg) aan in de Operations Manager-UI.
@@ -46,8 +46,8 @@ cert-contract resp. de lokale smokes.
 
 | Variabele | Default | Rol |
 |-----------|---------|-----|
-| `ZAD_API_KEY` | — (verplicht bij `apply`) | Auth tegen de ZAD v2-API; **de key van project `mpfoa-e01`**, niet de magazijnen-key. **Niet** inline zetten (`export`, niet `ZAD_API_KEY=... ./upsert-peer.sh ...` — dat komt in de shell-history). |
-| `ZAD_PROJECT` | `mpfoa-e01` | Eigen ZAD-project van de peer (los van het app-project). Bepaalt óók de namespace (`rig-prd-<project>`) in de cert-SAN's — `pki/gen-csr.sh` leest dezelfde var, dus een projectwissel is env-var-only (her-uitgeven + opnieuw uploaden). |
+| `ZAD_API_KEY` | — (verplicht bij `apply`) | Auth tegen de ZAD v2-API; **de key van project `mpfoa-e2w`**, niet de magazijnen-key. **Niet** inline zetten (`export`, niet `ZAD_API_KEY=... ./upsert-peer.sh ...` — dat komt in de shell-history). |
+| `ZAD_PROJECT` | `mpfoa-e2w` | Eigen ZAD-project van de peer (los van het app-project). Bepaalt óók de namespace (`rig-prd-<project>`) in de cert-SAN's — `pki/gen-csr.sh` leest dezelfde var, dus een projectwissel is env-var-only (her-uitgeven + opnieuw uploaden). |
 | `ZAD_DEPLOYMENT` | `test` | Default voor het `[deployment]`-argument (het CLI-arg wint). Gedeeld met `pki/gen-csr.sh` zodat cert-SAN's en deploy-adressen sporen. |
 | `ZAD_MAGAZIJNA_PROJECT` | `mpfm-w3h` | ZAD-project waarin de `magazijna`-app draait; bron voor de cross-project inway-upstream-URL. |
 | `ZAD_MAGAZIJNA_DEPLOYMENT` | `test` | Deployment van de `magazijna`-app waar de inway-upstream naar wijst (cross-project via ingress-URL). Zet bv. `pr-140` om tegen een app-preview te testen. |
@@ -58,10 +58,11 @@ cert-contract resp. de lokale smokes.
 | `ZAD_PG_SSLMODE` | `disable` | SSL-mode voor de `mgzpg`-DSN (intra-cluster plaintext, zoals berichtenbox-JDBC). |
 | `ZAD_PG_PASSWORD` | — (verplicht bij `apply`) | Wachtwoord voor de self-hosted Postgres (`mgzpg`). **Niet** committen; `export` (niet inline). Komt zowel in `POSTGRES_PASSWORD` als in de component-DSN's. |
 | `ZAD_PG_USER` / `ZAD_PG_DB` | `fsc` / `fsc` | Rol resp. database van `mgzpg`. |
-| `ZAD_MGR_SCHEMA` / `ZAD_CTL_SCHEMA` / `ZAD_TXLOG_SCHEMA` | `manager` / `controller` / `txlog` | `search_path`-schema per component (schema-isolatie migraties). Leeg = geen search_path (gedeeld `public`). Moeten sporen met `postgres-init.sql`. |
+| `ZAD_MGR_SCHEMA` / `ZAD_TXLOG_SCHEMA` | `manager` / `txlog` | `search_path`-schema voor de migratie-teller van manager resp. txlog (isolatie). Moeten sporen met `postgres-init.sql` (dat die twee aanmaakt). Leeg = geen search_path. |
+| `ZAD_CTL_SCHEMA` | _(leeg)_ | De controller draait **zonder** search_path — die maakt z'n eigen `controller`-schema aan; mét search_path loopt migratie #1 dirty vast. Alleen zetten als je weet wat je doet. |
 | `ZAD_POSTGRES_IMAGE` | `docker.io/library/postgres:17` | Image voor de `mgzpg`-component. |
 | `ZAD_MAGAZIJNA_UPSTREAM_URL` | `https://magazijna-<ZAD_MAGAZIJNA_DEPLOYMENT>-<ZAD_MAGAZIJNA_PROJECT>.<base-domain>` | Volledige override van de endpoint-URL naar de `magazijna`-app; standaard afgeleid uit `ZAD_MAGAZIJNA_DEPLOYMENT` + `ZAD_MAGAZIJNA_PROJECT` (ingress-URL, https/:443). |
 
-De workflow leest de ZAD-key uit het secret `ZAD_API_KEY_FSCORGA` (de key van project `mpfoa-e01`),
+De workflow leest de ZAD-key uit het secret `ZAD_API_KEY_FSCORGA` (de key van project `mpfoa-e2w`),
 niet `ZAD_API_KEY` direct — dat blijft de scriptinterne naam, gezet via `env:` in de workflow. Zet
 in GitHub dus **een secret `ZAD_API_KEY_FSCORGA`** en (optioneel) de var `ZAD_PROJECT_ID_MPFOA`.

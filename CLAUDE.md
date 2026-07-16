@@ -34,7 +34,7 @@ contract, trust-anchor, passthrough, SNI, txlog, announce.
 | Group ID | `moza-fbs-test` |
 | Directory-OIN | `00000000000000000010` (draait in repo A) |
 | Dienst in de directory | `berichtenmagazijn` |
-| ZAD-project / deployment | `mpfoa-e01` / `test` |
+| ZAD-project / deployment | `mpfoa-e2w` / `test` |
 
 **Peer ID = geldige OIN** (uit cert `subject.serialNumber`), peer-naam uit `subject.organization`.
 
@@ -44,7 +44,7 @@ contract, trust-anchor, passthrough, SNI, txlog, announce.
   naar fsc-testnet's group-root. Kopieer daarom fsc-testnet's `ca/{root,intermediate}.pem` (+ keys)
   in `pki/ca/` en draai **niet** `init-ca.sh` (dat maakt een verse, vreemde CA — enkel voor de
   geïsoleerde lokale proof). De per-peer INTERNAL-CA blijft wél lokaal/self-signed.
-- **Project-isolatie:** de peer draait in een eigen ZAD-project (`mpfoa-e01`) met een eigen
+- **Project-isolatie:** de peer draait in een eigen ZAD-project (`mpfoa-e2w`) met een eigen
   API-key (secret `ZAD_API_KEY_FSCORGA`). De magazijn-app draait apart en wordt cross-project via
   de ingress-URL bereikt.
 - **Twee cert-ketens per endpoint:** GROUP (extern, mesh) via de group-intermediate; INTERNAL
@@ -63,12 +63,15 @@ De ZAD Operations Manager v2-API heeft niet-triviaal gedrag. Deze punten kostten
   `upsert-peer.sh` lost alle inter-component-hostnamen concreet op en zet ze in `env_vars`. Sinds de
   self-hosted Postgres (`mgzpg`, 2026-07-15) is óók de DB-DSN concreet — geen ZAD `$DATABASE_*` /
   aliases meer nodig.
-- **DB = self-hosted `mgzpg`, niet ZAD-managed.** Eén Postgres-component, één database, drie
-  geïsoleerde schema's (`manager`/`controller`/`txlog`) via `deploy/zad/postgres-init.sql`
-  (init-attachment op `/docker-entrypoint-initdb.d`). Elke FSC-component verbindt met een eigen
-  `search_path` zodat de golang-migrate-tellers niet botsen (anders `42P01` op `controller.services`).
-  Wachtwoord via `ZAD_PG_PASSWORD` (verplicht bij `apply`, niet committen). manager migreert via de
-  wrapper; controller/txlog migreren los (zelfde `search_path`).
+- **DB = self-hosted `mgzpg`, niet ZAD-managed.** Eén Postgres-component, één database met
+  geïsoleerde golang-migrate-tellers per component (anders skipt een migratie → `42P01` op
+  `controller.services`). **manager + txlog** isoleren via een eigen `search_path`-schema
+  (`manager`/`txlog`, vooraf aangemaakt door `deploy/zad/postgres-init.sql`, init-attachment op
+  `/docker-entrypoint-initdb.d`). De **controller is de uitzondering**: mét `search_path` liep migratie
+  #1 dirty vast — die draait ZONDER (`ZAD_CTL_SCHEMA=""`), maakt z'n eigen `controller`-schema aan en
+  houdt z'n teller in `public`. Init-script maakt daarom alléén `manager` + `txlog` aan. Wachtwoord via
+  `ZAD_PG_PASSWORD` (verplicht bij `apply`, niet committen). manager + controller migreren bij boot via
+  een wrapper (`manager-migrate` / `controller-migrate`).
 - **txlog is verplicht.** Een niet-directory manager faalt hard op een lege `TX_LOG_API_ADDRESS`
   (`tx-log-api-address is required...`). Er draait dus een `mgztxlog`-component (eigen managed
   Postgres, internal-PKI mTLS).
