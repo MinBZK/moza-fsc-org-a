@@ -53,7 +53,11 @@ jobs:
         env:
           # Eigen project mpfoa-e2w => eigen API-key (NIET de magazijnen-key).
           ZAD_API_KEY: ${{ secrets.ZAD_API_KEY_FSCORGA }}
+          # Self-hosted mgzpg-Postgres: verplicht bij apply. Een bestaande secret wordt NIET vanzelf
+          # een env-var — expliciet doorgeven, anders faalt upsert-peer.sh op de :? -check.
+          ZAD_PG_PASSWORD: ${{ secrets.ZAD_PG_PASSWORD }}
           ZAD_PROJECT: ${{ env.PROJECT }}
+          ZAD_BASE_DOMAIN: ${{ env.BASE_DOMAIN }}
           ZAD_MAGAZIJNA_PROJECT: ${{ env.MAGAZIJNA_PROJECT }}
           IMAGE_TAG: v1.43.7
         run: ./deploy/zad/upsert-peer.sh apply "${DEPLOYMENT}" "${IMAGE_TAG}"
